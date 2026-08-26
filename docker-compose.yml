@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:latest
+    container_name: insurance_cerbos
+    ports:
+      - "3592:3592"
+      - "3593:3593"
+    volumes:
+      - ./cerbos-policies:/policies
+    command:
+      - "server"
+      - "--config=/dev/null"
+      - "--set=server.httpListenAddr=:3592"
+      - "--set=server.grpcListenAddr=:3593"
+      - "--set=storage.driver=disk"
+      - "--set=storage.disk.directory=/policies"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3592/_cerbos/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── mongodb-mcp-server ───────────────────────────────────────────────────────
+  # Runs the official MongoDB MCP server as an HTTP service on port 4000.
+  # The Next.js tool executor connects to this via @ai-sdk/mcp HTTP transport.
+  #
+  # Security posture:
+  #   --readOnly              : prevents all write operations at the MCP layer
+  #   --disabledTools         : defence-in-depth — mutation tools not even registered
+  #   MDB_MCP_READ_ONLY=true  : environment-level enforcement
+  #
+  # Connection:
+  #   MDB_MCP_CONNECTION_STRING is sourced from MONGODB_URI in .env.local
+  #   (loaded via env_file below). This works for both Atlas and local URIs.
+  mongodb-mcp-server:
+    image: node:22-alpine
+    container_name: insurance_mcp_server
+    working_dir: /app
+    # Load .env.local so MONGODB_URI (and any other vars) are available
+    # inside the container without hardcoding the connection string here.
+    env_file:
+      - .env.local
+    command:
+      - sh
+      - -c
+      - |
+        npm install -g mongodb-mcp-server@2.1.0 --prefer-offline --no-audit --no-fund 2>/dev/null
+        exec mongodb-mcp-server \
+          --transport http \
+          --httpPort 4000 \
+          --httpHost 0.0.0.0 \
+          --readOnly \
+          --disabledTools insert-many,update-many,delete-many,drop-database,drop-collection,drop-index,create-index,create-collection,rename-collection
+    ports:
+      - "4000:4000"
+    environment:
+      # Read the Atlas (or local) URI from .env.local via the env_file above.
+      # This replaces the previous hardcoded "mongodb://mongodb:27017/..." string.
+      MDB_MCP_CONNECTION_STRING: "${MONGODB_URI}"
+      MDB_MCP_READ_ONLY: "true"
+      MDB_MCP_CONNECTION_SCOPE: "global"
+      DO_NOT_TRACK: "1"
+      NO_UPDATE_NOTIFIER: "1"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s

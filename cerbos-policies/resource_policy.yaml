@@ -1,0 +1,80 @@
+---
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: insurance_policy
+  version: default
+
+  rules:
+    # ── Rule 1: insurance_agent — read/list/aggregate own policies only ────────
+    # ABAC baseline: both tenant_id AND agent_id must match the principal.
+    # planResources returns KIND_CONDITIONAL with two eq() clauses compiled to:
+    #   { $and: [{ tenant_id: "<P.attr.tenant_id>" }, { agent_id: "<P.id>" }] }
+    # Any action not listed here is implicitly DENIED by Cerbos default-deny.
+    - name: agent_own_policies
+      actions:
+        - read
+        - list
+        - aggregate
+      effect: EFFECT_ALLOW
+      roles:
+        - insurance_agent
+      condition:
+        match:
+          all:
+            of:
+              - expr: R.attr.tenant_id == P.attr.tenant_id
+              - expr: R.attr.agent_id == P.id
+
+    # ── Rule 2: tenant_admin — read/list/aggregate any policy in their tenant ──
+    # Elevated read scope: only tenant_id is checked, agent_id is NOT enforced.
+    # planResources returns KIND_CONDITIONAL with a single eq() clause compiled to:
+    #   { tenant_id: "<P.attr.tenant_id>" }
+    # The admin for Tenant_A sees ALL Tenant_A policies across every agent,
+    # but ZERO Tenant_B policies (the tenant boundary is still hard-enforced).
+    - name: admin_tenant_read
+      actions:
+        - read
+        - list
+        - aggregate
+      effect: EFFECT_ALLOW
+      roles:
+        - tenant_admin
+      condition:
+        match:
+          expr: R.attr.tenant_id == P.attr.tenant_id
+
+    # ── Rule 3 [COMMENTED — sample write rule for tenant_admin] ───────────────
+    # Uncomment to allow tenant_admin to update policy records within their tenant.
+    # Before enabling:
+    #   1. Remove "update-many" from --disabledTools in docker-compose.yml so
+    #      mongodb-mcp-server accepts write tool calls.
+    #   2. Add "update" to the secure_search_policies tool's allowed action list
+    #      in src/mcp/mcpServer.ts so the LLM can invoke it.
+    #   3. Consider adding an output block to audit every write via Cerbos audit log.
+    #
+    # - name: admin_write_own_tenant
+    #   actions:
+    #     - update
+    #   effect: EFFECT_ALLOW
+    #   roles:
+    #     - tenant_admin
+    #   condition:
+    #     match:
+    #       all:
+    #         of:
+    #           # Hard tenant boundary — cannot write across tenants
+    #           - expr: R.attr.tenant_id == P.attr.tenant_id
+    #           # Optional: restrict to status transitions only (Pending → Active)
+    #           # Uncomment the line below to enforce this additional guard:
+    #           # - expr: R.attr.status == "Pending"
+
+    # ── NOTE: No explicit deny rule needed ────────────────────────────────────
+    # Cerbos operates on default-deny: any action not covered by an EFFECT_ALLOW
+    # rule above is automatically KIND_ALWAYS_DENIED. This means:
+    #   - create, update, delete, drop, export → KIND_ALWAYS_DENIED for all roles
+    #   - cross-tenant reads → KIND_ALWAYS_DENIED (tenant condition never matches)
+    #   - insurance_agent reading another agent's data → KIND_ALWAYS_DENIED
+    # An explicit EFFECT_DENY rule is only needed when you want to override an
+    # ALLOW that would otherwise apply (e.g. deny a specific role that inherits
+    # from a broader ALLOW). Adding a wildcard deny here would conflict with the
+    # ALLOW rules above and cause unintended ALWAYS_DENIED responses.

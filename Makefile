@@ -1,0 +1,184 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## InsureAI — Makefile
+## Usage: make <target>
+##
+## All database operations (seed, reset, count) call the Next.js API routes
+## which use the MongoDB Node.js driver directly — no mongosh required.
+## The driver reads MONGODB_URI from .env.local (Atlas or local URI).
+## ─────────────────────────────────────────────────────────────────────────────
+
+PORT     := 3888
+APP_URL  := http://localhost:$(PORT)
+SEED_URL := $(APP_URL)/api/seed
+
+.DEFAULT_GOAL := help
+
+# ── Help ───────────────────────────────────────────────────────────────────────
+.PHONY: help
+help:
+	@echo ""
+	@echo "  InsureAI — available commands"
+	@echo ""
+	@echo "  Infrastructure"
+	@echo "    make up          Start Cerbos + mongodb-mcp-server (detached)"
+	@echo "    make down        Stop and remove containers"
+	@echo "    make restart     down + up"
+	@echo "    make logs        Tail all container logs"
+	@echo "    make status      Show container health"
+	@echo "    make mcp-status  Check mongodb-mcp-server health"
+	@echo "    make mcp-logs    Tail mongodb-mcp-server logs only"
+	@echo ""
+	@echo "  Database  (requires: npm run dev is running on port $(PORT))"
+	@echo "    make seed        Seed Atlas DB with 20 records (idempotent)"
+	@echo "    make reset       Drop collection and re-seed all 20 records"
+	@echo "    make db-count    Show document count per agent"
+	@echo "    make db-shell    How to open a MongoDB shell"
+	@echo ""
+	@echo "  App"
+	@echo "    make install     npm install"
+	@echo "    make dev         Start Next.js dev server on port $(PORT)"
+	@echo "    make build       Production build"
+	@echo "    make start       Start production server on port $(PORT)"
+	@echo ""
+	@echo "  Convenience"
+	@echo "    make boot        up (containers) + dev (Next.js)"
+	@echo "    make nuke        down + remove volumes (full wipe)"
+	@echo ""
+
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+.PHONY: up
+up:
+	@echo "▶ Starting containers..."
+	docker compose up -d
+	@echo "▶ Waiting for Cerbos to be healthy..."
+	@until docker inspect insurance_cerbos --format='{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do \
+		printf "."; sleep 2; \
+	done
+	@echo ""
+	@echo "✓ Containers ready."
+
+.PHONY: down
+down:
+	@echo "▶ Stopping containers..."
+	docker compose down
+
+.PHONY: restart
+restart: down up
+
+.PHONY: logs
+logs:
+	docker compose logs -f
+
+.PHONY: status
+status:
+	@docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" \
+		--filter name=insurance_cerbos \
+		--filter name=insurance_mcp_server
+
+## Check mongodb-mcp-server reachability and probe the MCP HTTP endpoint
+.PHONY: mcp-status
+mcp-status:
+	@echo "▶ mongodb-mcp-server container status..."
+	@docker inspect insurance_mcp_server --format='  Status: {{.State.Status}} | Running: {{.State.Running}}' 2>/dev/null || echo "  container not found"
+	@echo ""
+	@echo "▶ Probing MCP HTTP endpoint (http://localhost:4000/mcp)..."
+	@curl -s -o /dev/null -w "  HTTP status: %{http_code}\n" http://localhost:4000/ 2>/dev/null || echo "  ✗ not reachable on port 4000"
+	@echo ""
+	@echo "▶ Container process:"
+	@docker exec insurance_mcp_server ps aux 2>/dev/null | grep mongodb-mcp || echo "  not running"
+	@echo ""
+
+## Tail only the mongodb-mcp-server container logs
+.PHONY: mcp-logs
+mcp-logs:
+	docker logs -f insurance_mcp_server
+
+# ── Database ───────────────────────────────────────────────────────────────────
+# All operations use the MongoDB Node.js driver via the /api/seed route.
+# No mongosh or local MongoDB container required.
+# Requires: npm run dev to be running on port $(PORT).
+
+## Idempotent seed — only inserts 20 records if the collection is empty.
+## Uses the MongoDB driver (MONGODB_URI from .env.local) — no mongosh needed.
+.PHONY: seed
+seed:
+	@echo "▶ Seeding Atlas database via $(SEED_URL) ..."
+	@curl -s -X GET $(SEED_URL) | python3 -m json.tool 2>/dev/null || curl -s -X GET $(SEED_URL)
+	@echo ""
+
+## Drop the insurance_policies collection and re-seed all 20 records from scratch.
+## Uses the MongoDB driver (MONGODB_URI from .env.local) — no mongosh needed.
+.PHONY: reset
+reset:
+	@echo "▶ Resetting Atlas database via $(SEED_URL) ..."
+	@curl -s -X DELETE $(SEED_URL) | python3 -m json.tool 2>/dev/null || curl -s -X DELETE $(SEED_URL)
+	@echo ""
+
+## Alias: db-reset calls reset (kept for backward compatibility)
+.PHONY: db-reset
+db-reset: reset
+
+## Show document count per agent and status via the seed API response.
+## Uses the MongoDB driver (MONGODB_URI from .env.local) — no mongosh needed.
+.PHONY: db-count
+db-count:
+	@echo "▶ Querying document counts via $(SEED_URL) ..."
+	@curl -s -X GET $(SEED_URL) | python3 -c "\
+import sys, json; \
+d = json.load(sys.stdin); \
+print('  Status : ' + ('already seeded' if not d.get('seeded') else 'freshly seeded')); \
+print('  Total  : ' + str(d.get('count', '?'))); \
+" 2>/dev/null || curl -s -X GET $(SEED_URL)
+	@echo ""
+	@echo "  For per-agent breakdown, visit:"
+	@echo "  $(APP_URL)/api/seed"
+	@echo ""
+
+## Print instructions for connecting a MongoDB shell to Atlas.
+## mongosh is not required for this project — all operations use the Node.js driver.
+.PHONY: db-shell
+db-shell:
+	@echo ""
+	@echo "  MongoDB shell options:"
+	@echo ""
+	@echo "  Option A — mongosh (if installed locally):"
+	@echo "    mongosh \"\$$MONGODB_URI\""
+	@echo "    (set MONGODB_URI from .env.local first)"
+	@echo ""
+	@echo "  Option B — MongoDB Atlas web UI:"
+	@echo "    https://cloud.mongodb.com → your cluster → Browse Collections"
+	@echo ""
+
+# ── App ────────────────────────────────────────────────────────────────────────
+.PHONY: install
+install:
+	npm install
+
+.PHONY: dev
+dev:
+	npm run dev
+
+.PHONY: build
+build:
+	npm run build
+
+.PHONY: start
+start:
+	npm run start
+
+# ── Convenience ────────────────────────────────────────────────────────────────
+
+## One-command start: bring up containers, then start Next.js dev server.
+## Database seeding happens automatically on the first tool call (auto-seed).
+## Or run `make seed` manually after the server starts.
+.PHONY: boot
+boot: up
+	@echo "▶ Starting Next.js dev server on port $(PORT)..."
+	npm run dev
+
+## Full wipe: stop containers and delete all Docker volumes
+.PHONY: nuke
+nuke:
+	@echo "▶ Nuking containers and volumes..."
+	docker compose down -v
+	@echo "✓ All containers and volumes removed."
