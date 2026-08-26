@@ -1069,9 +1069,9 @@ export default function ChatPage() {
               )}
             </PanelSection>
 
-            {/* ── 3. MongoDB Query Pipeline ─────────────────────────────── */}
+            {/* ── 3. MongoDB Query Pipeline / Vector Search Pipeline ────── */}
             <PanelSection
-              title="MongoDB Query Pipeline"
+              title={securityCtx?.toolName === "search_sessions" ? "Vector Search Pipeline" : "MongoDB Query Pipeline"}
               icon={Database}
               accentColor="emerald"
               defaultOpen={true}
@@ -1107,18 +1107,22 @@ export default function ChatPage() {
                   <div className="flex items-center gap-2 px-1">
                     <div className="flex-1 h-px bg-zinc-800" />
                     <span className="text-zinc-600 text-[10px] font-mono flex-shrink-0">
-                      ↓ merged with LLM-generated MQL
+                      {securityCtx.toolName === "search_sessions"
+                        ? "↓ Voyage embeds query → $vectorSearch pipeline"
+                        : "↓ merged with LLM-generated MQL"}
                     </span>
                     <div className="flex-1 h-px bg-zinc-800" />
                   </div>
 
-                  {/* ── Step 2: LLM-generated MQL filter ────────────────── */}
+                  {/* ── Step 2: LLM-generated MQL / Voyage query input ───── */}
                   <div className="rounded-lg border border-zinc-800 overflow-hidden">
                     <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900 border-b border-zinc-800">
                       <div className="flex items-center gap-1.5">
                         <span className="w-4 h-4 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold flex items-center justify-center flex-shrink-0">2</span>
                         <span className="text-zinc-400 text-xs font-mono">
-                          LLM-Generated MQL
+                          {securityCtx.toolName === "search_sessions"
+                            ? "Voyage Query Input"
+                            : "LLM-Generated MQL"}
                           {securityCtx.toolName && (
                             <span className="text-zinc-600 ml-1">({securityCtx.toolName})</span>
                           )}
@@ -1148,35 +1152,46 @@ export default function ChatPage() {
                   <div className="flex items-center gap-2 px-1">
                     <div className="flex-1 h-px bg-zinc-800" />
                     <span className="text-zinc-600 text-[10px] font-mono flex-shrink-0">
-                      ↓ produces final secured query
+                      {securityCtx.toolName === "search_sessions"
+                        ? "↓ produces secured $vectorSearch pipeline"
+                        : "↓ produces final secured query"}
                     </span>
                     <div className="flex-1 h-px bg-zinc-800" />
                   </div>
 
                   {/* ── Step 3: Final secured query sent to MongoDB ─────── */}
                   {(() => {
+                    const isVectorSearch = securityCtx.toolName === "search_sessions";
                     const isAgg = securityCtx.toolName === "aggregate";
-                    const copyText = isAgg
-                      ? `db.insurance_policies.aggregate(\n${JSON.stringify((securityCtx.finalMongoQuery as { pipeline?: unknown[] }).pipeline ?? securityCtx.finalMongoQuery, null, 2)}\n)`
-                      : `db.insurance_policies.${securityCtx.toolName ?? "find"}(\n${JSON.stringify(securityCtx.finalMongoQuery, null, 2)}\n)`;
-                    const callLabel = isAgg ? "aggregate(" : `${securityCtx.toolName ?? "find"}(`;
-                    const displayData = isAgg
-                      ? ((securityCtx.finalMongoQuery as { pipeline?: unknown[] }).pipeline ?? securityCtx.finalMongoQuery)
+                    // Collection differs: chat_sessions for vector search, insurance_policies otherwise
+                    const collection = isVectorSearch ? "chat_sessions" : "insurance_policies";
+                    // Both vector search and aggregate use aggregate(); others use their own name
+                    const callLabel = isVectorSearch || isAgg
+                      ? "aggregate("
+                      : `${securityCtx.toolName ?? "find"}(`;
+                    // Extract pipeline array for display
+                    const displayData = (isVectorSearch || isAgg)
+                      ? ((securityCtx.finalMongoQuery as { pipeline?: unknown[] }).pipeline
+                          ?? securityCtx.finalMongoQuery)
                       : securityCtx.finalMongoQuery;
+                    const copyText = `db.${collection}.aggregate(\n${JSON.stringify(displayData, null, 2)}\n)`;
+                    const step3Label = isVectorSearch
+                      ? "Final $vectorSearch Pipeline"
+                      : `Final Secured Query → ${securityCtx.toolName ?? "find"}()`;
                     return (
                       <div className="rounded-lg border border-emerald-500/30 overflow-hidden">
                         <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-500/5 border-b border-emerald-500/20">
                           <div className="flex items-center gap-1.5">
                             <span className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[9px] font-bold flex items-center justify-center flex-shrink-0">3</span>
                             <span className="text-emerald-300 text-xs font-mono font-semibold">
-                              Final Secured Query → {securityCtx.toolName ?? "find"}()
+                              {step3Label}
                             </span>
                           </div>
                           <CopyButton text={copyText} />
                         </div>
                         <div className="px-3 py-2.5 bg-zinc-950">
                           <p className="text-zinc-600 text-[10px] font-mono mb-1.5">
-                            db.insurance_policies.{callLabel}
+                            db.{collection}.{callLabel}
                           </p>
                           <div className="pl-2 border-l-2 border-emerald-500/30">
                             <JsonHighlight data={displayData} />
@@ -1190,7 +1205,9 @@ export default function ChatPage() {
                   {/* ── Result stats ────────────────────────────────────── */}
                   <div className="grid grid-cols-2 gap-1.5 text-xs">
                     <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-2">
-                      <p className="text-zinc-600 mb-0.5">Documents returned</p>
+                      <p className="text-zinc-600 mb-0.5">
+                        {securityCtx.toolName === "search_sessions" ? "Sessions found" : "Documents returned"}
+                      </p>
                       <p className="text-emerald-400 font-mono font-bold text-sm">{securityCtx.resultCount}</p>
                     </div>
                     <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-2">
@@ -1214,40 +1231,43 @@ export default function ChatPage() {
                 defaultOpen={false}
               >
                 <div className="space-y-2 text-xs">
+                  {/* tenant_id boundary — shown for all tools */}
                   <div className="flex items-start gap-2">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
                     <p className="text-zinc-400 leading-relaxed">
                       Cerbos AST enforces{" "}
                       <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">tenant_id = {securityCtx.principal.tenantId}</code>{" "}
-                      at the database filter level.
+                      at the {securityCtx.toolName === "search_sessions" ? "$vectorSearch filter level (inside ANN scan)" : "database filter level"}.
                     </p>
                   </div>
+                  {/* agent_id boundary — shown only when the compiled filter includes it */}
+                  {"agent_id" in securityCtx.compiledMongoFilter ||
+                   JSON.stringify(securityCtx.compiledMongoFilter).includes("agent_id") ? (
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                      <p className="text-zinc-400 leading-relaxed">
+                        Cerbos AST enforces{" "}
+                        <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">agent_id = {securityCtx.principal.id}</code>{" "}
+                        {securityCtx.toolName === "search_sessions"
+                          ? "— only chat sessions this agent created are retrievable."
+                          : "preventing cross-agent reads within the same tenant."}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="flex items-start gap-2">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
                     <p className="text-zinc-400 leading-relaxed">
-                      Cerbos AST enforces{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">agent_id = {securityCtx.principal.id}</code>{" "}
-                      preventing cross-agent reads within the same tenant.
-                    </p>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
-                    <p className="text-zinc-400 leading-relaxed">
-                      The LLM writes full MQL but cannot include{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">tenant_id</code> or{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">agent_id</code> — those are never
-                      in the tool schema. The session is injected server-side from the{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">httpOnly</code> cookie only.
+                      {securityCtx.toolName === "search_sessions"
+                        ? <>The LLM only supplies a natural language <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">query</code> string. The Voyage embedding, Cerbos filter, and <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">$vectorSearch</code> pipeline are constructed server-side from the <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">httpOnly</code> cookie only.</>
+                        : <>The LLM writes full MQL but cannot include <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">tenant_id</code> or <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">agent_id</code> — those are never in the tool schema. The session is injected server-side from the <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">httpOnly</code> cookie only.</>}
                     </p>
                   </div>
                   <div className="flex items-start gap-2">
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
                     <p className="text-zinc-500 leading-relaxed">
-                      Even if the LLM generated a filter containing{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">&#123; tenant_id: &quot;Tenant_B&quot; &#125;</code>,
-                      the server-side{" "}
-                      <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">mergeFilters()</code>{" "}
-                      would still enforce the Cerbos security boundary, making cross-tenant access structurally impossible.
+                      {securityCtx.toolName === "search_sessions"
+                        ? <>The Cerbos filter is pushed into the Atlas ANN index scan via <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">$vectorSearch.filter</code> — documents outside the boundary are excluded before scoring, not post-filtered.</>
+                        : <>Even if the LLM generated a filter containing <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">&#123; tenant_id: &quot;Tenant_B&quot; &#125;</code>, the server-side <code className="bg-zinc-800 px-1 rounded font-mono text-zinc-300">mergeFilters()</code> would still enforce the Cerbos security boundary, making cross-tenant access structurally impossible.</>}
                     </p>
                   </div>
                 </div>

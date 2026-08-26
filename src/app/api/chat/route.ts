@@ -4,9 +4,11 @@ import { streamText, convertToCoreMessages, StreamData, type JSONValue, tool } f
 import { jsonSchema } from "ai";
 import { getSessionFromRequest } from "@/lib/session";
 import { createCerbosWrappedTools, DATA_TOOL_NAMES } from "@/mcp/mcpServer";
+import { getCerbosClient, buildCerbosPrincipal, CHAT_SESSION_RESOURCE_KIND } from "@/lib/cerbos";
+import { planResponseToMongoFilter } from "@/lib/ast-to-mongo";
 import { embedText } from "@/lib/voyage";
 import { VECTOR_INDEX_NAME, CHAT_SESSIONS_COLLECTION } from "@/lib/chatSessions";
-import type { AgentSession, McpToolResult, SessionSearchResult } from "@/types";
+import type { AgentSession, McpToolResult, SessionSearchResult, SecurityContext } from "@/types";
 
 // ─── Azure OpenAI Client ───────────────────────────────────────────────────────
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -23,7 +25,7 @@ export interface SessionSearchToolResult {
   results: SessionSearchResult[];
   total: number;
   query: string;
-  security_filter: Record<string, string>;
+  security_context: SecurityContext;   // powers the analytics panel — same as MCP tools
 }
 
 // ─── System Prompt Builder ────────────────────────────────────────────────────
@@ -52,52 +54,98 @@ function buildSystemPrompt(session: AgentSession): string {
 
 ${securityRules}
 
-AVAILABLE TOOLS:
-- find: Query CURRENT insurance policy documents with a MongoDB filter. Best for fetching live policy records.
-- aggregate: Run a pipeline for grouping, statistics, and complex transformations on CURRENT policy data.
-- count: Count matching CURRENT policy documents without fetching them. Best for "how many" questions.
-- collection_schema: Inspect field names and types before querying.
-- collection_indexes: List collection indexes for query planning.
+═══════════════════════════════════════════════════════════════
+MANDATORY FIRST STEP — SCHEMA CHECK BEFORE EVERY DATA QUERY
+═══════════════════════════════════════════════════════════════
+Before calling find, aggregate, or count, you MUST call collection_schema first.
+No exceptions — even if you believe you know the field names.
+
+Reason: field names in the database may differ from natural language.
+For example:
+  "Alice Johnson" → field is client_name  (NOT customer_name, NOT name, NOT customer)
+  "auto policy"   → field is policy_type  (NOT type, NOT coverage_type)
+
+KNOWN FIELD NAMES (always verify via collection_schema before use):
+  client_name      — customer's full name (e.g. "Alice Johnson")
+  policy_number    — policy ID string (e.g. "INS-2024-001")
+  policy_type      — "Auto" | "Home" | "Life"
+  status           — "Active" | "Pending" | "Cancelled" | "Expired"
+  coverage_amount  — numeric, in dollars
+  premium_monthly  — numeric, monthly premium in dollars
+  deductible       — numeric, in dollars
+  start_date       — ISO date string "YYYY-MM-DD"
+  end_date         — ISO date string "YYYY-MM-DD"
+  agent_name       — agent's full name (e.g. "Sarah Chen")
+  notes            — free text notes on the policy
+
+MANDATORY QUERY WORKFLOW for every data question:
+  1. Call collection_schema          ← ALWAYS FIRST, NO EXCEPTIONS
+  2. Read the field names from schema output
+  3. Call find / aggregate / count   ← using the verified field names
+
+═══════════════════════════════════════════════════════════════
+AVAILABLE TOOLS
+═══════════════════════════════════════════════════════════════
+- collection_schema: ALWAYS call this first before any data query.
+  Returns exact field names and types for the insurance_policies collection.
+
+- collection_indexes: List indexes for query planning. Call after collection_schema
+  if you need to understand which fields are indexed.
+
+- find: Query CURRENT insurance policy documents. Use after collection_schema.
+  filter_json must be a JSON string with verified field names.
+
+- aggregate: Run a pipeline on CURRENT policy data. Use after collection_schema.
+  pipeline_json must be a JSON string array.
+
+- count: Count CURRENT policy documents. Use after collection_schema.
+  query_json must be a JSON string with verified field names.
+
 - search_sessions: Semantic search over PAST CUSTOMER SERVICE CHAT SESSIONS.
-  Use this for questions about previous conversations, historical issues, or follow-up actions.
-  The server handles embedding — you only provide a natural language query string.
-  Examples of when to use search_sessions (NOT find/aggregate):
+  Does NOT query insurance_policies — do NOT call collection_schema before this.
+  The server handles embedding. Provide only a natural language query string.
+
+  Use search_sessions for questions about past conversations, NOT for current data:
     "What did I discuss with Alice last time?"       → search_sessions(query="Alice Johnson conversation")
     "Any sessions about claim disputes?"             → search_sessions(query="claim dispute escalation")
     "Show me pending follow-up actions"              → search_sessions(query="pending follow-up actions")
     "Past conversations about policy renewals"       → search_sessions(query="policy renewal")
     "Which customers asked about deductibles?"       → search_sessions(query="deductible question")
-    "Did I have any sessions with home insurance issues?" → search_sessions(query="home insurance issue")
 
-CHOOSING THE RIGHT TOOL:
-- Question about a current policy record → find / aggregate / count
-- Question about a past conversation or follow-up → search_sessions
-- "Show me Alice's policy"     → find (current data)
-- "What did I talk to Alice about?" → search_sessions (past session)
-- "How many active auto policies?"  → count (current data)
-- "Any past sessions about auto claims?" → search_sessions (past sessions)
+═══════════════════════════════════════════════════════════════
+CHOOSING THE RIGHT TOOL
+═══════════════════════════════════════════════════════════════
+Current policy data   → collection_schema → find / aggregate / count
+Past chat sessions    → search_sessions (skip schema step)
 
-QUERY STRATEGY — filter/query/pipeline must be passed as JSON STRINGS:
-- "show me policies expiring before 2027"      → find  filter_json='{"end_date":{"$lt":"2027-01-01"}}'
-- "how many active auto policies?"             → count  query_json='{"status":"Active","policy_type":"Auto"}'
-- "average premium by policy type"            → aggregate  pipeline_json='[{"$group":{"_id":"$policy_type","avg":{"$avg":"$premium_monthly"}}}]'
-- "policies with coverage over $200k"         → find  filter_json='{"coverage_amount":{"$gt":200000}}'
-- "all policies" (no extra filter)            → find  filter_json='{}'
-- Always use ISO date strings YYYY-MM-DD for date comparisons.
-- Use collection_schema if you are unsure of available field names.
+Examples:
+  "Show me Alice's policy"        → collection_schema → find(client_name: "Alice Johnson")
+  "What did I talk to Alice about?" → search_sessions(query="Alice Johnson")
+  "How many active auto policies?"  → collection_schema → count(status:"Active", policy_type:"Auto")
+  "Any past sessions about auto claims?" → search_sessions(query="auto insurance claim")
+
+═══════════════════════════════════════════════════════════════
+QUERY SYNTAX — always pass filter/pipeline as JSON STRINGS
+═══════════════════════════════════════════════════════════════
+- Customer name query:  filter_json='{"client_name":"Alice Johnson"}'
+- Status + type filter: filter_json='{"status":"Active","policy_type":"Auto"}'
+- Date range:           filter_json='{"end_date":{"$lt":"2027-01-01"}}'
+- Coverage threshold:   filter_json='{"coverage_amount":{"$gt":200000}}'
+- All records:          filter_json='{}'
+- Group by type:        pipeline_json='[{"$group":{"_id":"$policy_type","count":{"$sum":1}}}]'
+- Always use ISO dates YYYY-MM-DD for date comparisons.
 
 ROLE-BASED SCOPE:
 - Your current role: ${session.roles.join(", ")}
 - Your tenant: ${session.tenantId}
 - Cerbos enforces your authorized scope on every query. You will never see data outside it.
-- search_sessions is also Cerbos-secured: you can only search sessions within your authorized scope.
+- search_sessions is also Cerbos-secured: only sessions within your scope are returned.
 
 RESPONSE FORMAT:
 - Use markdown tables for multi-record summaries.
 - If a query returns 0 results, state that clearly — do not speculate.
 - Summarize coverage amounts, premiums, status, and dates concisely.
-- For search_sessions results: present each session as a clear summary with customer name,
-  date, what was discussed, and any follow-up actions still pending.`;
+- For search_sessions results: present customer name, date, summary, and any pending follow-up actions.`;
 }
 
 // ─── POST /api/chat ────────────────────────────────────────────────────────────
@@ -191,13 +239,6 @@ export async function POST(req: NextRequest) {
     return docs;
   }
 
-  const isAdmin = session.roles.includes("tenant_admin");
-  // Cerbos security filter — mirrors chat-session/search/route.ts exactly
-  const sessionSecurityFilter: Record<string, string> = {
-    tenant_id: session.tenantId,
-    ...(isAdmin ? {} : { agent_id: session.id }),
-  };
-
   const searchSessionsTool = tool({
     description: `Semantic search over past customer service chat sessions.
 Use this when the agent asks about PREVIOUS CONVERSATIONS, PAST ISSUES, or FOLLOW-UP ACTIONS
@@ -231,13 +272,39 @@ Examples of queries that should use this tool:
 
     execute: async ({ query, limit }): Promise<SessionSearchToolResult> => {
       const safeLimit = Math.min(Math.max(limit ?? 5, 1), 10);
+      const queriedAt = new Date().toISOString();
 
       console.log(`\n${"═".repeat(60)}`);
       console.log(`[Tool: search_sessions] Session: ${session.id} @ ${session.tenantId}`);
       console.log(`[Tool: search_sessions] Query: "${query}" | limit: ${safeLimit}`);
-      console.log(`[Tool: search_sessions] Security filter: ${JSON.stringify(sessionSecurityFilter)}`);
 
-      // Step 1: Embed the query with Voyage AI (server-side — LLM cannot do this)
+      // ── Gap 1 Fix: call planResources on chat_session (not hardcoded if/else) ──
+      // This makes Cerbos the single source of truth for session access policy.
+      // Any future role changes in chat_session_policy.yaml automatically propagate.
+      const cerbos = getCerbosClient();
+      const principal = buildCerbosPrincipal(session);
+
+      let planKind: string = "CERBOS_UNREACHABLE";
+      let rawAst: SecurityContext["cerbosRawAst"] = null;
+      let securityFilter: Record<string, unknown> = { _id: { $in: [] } }; // deny-all default
+
+      try {
+        const planResponse = await cerbos.planResources({
+          principal,
+          resource: { kind: CHAT_SESSION_RESOURCE_KIND },
+          action: "search",
+        });
+        const compiled = planResponseToMongoFilter(planResponse);
+        securityFilter = compiled.filter;
+        planKind       = compiled.planKind;
+        rawAst         = compiled.rawAst;
+        console.log(`[Cerbos/chat_session] Plan: ${planKind} → ${JSON.stringify(securityFilter)}`);
+      } catch (err) {
+        console.error("[Cerbos/chat_session] PDP unreachable:", err);
+        // Fail closed — deny-all filter already set above
+      }
+
+      // ── Step 1: Embed the query with Voyage AI ──────────────────────────────
       let queryVector: number[];
       try {
         queryVector = await embedText(query, "query");
@@ -245,34 +312,42 @@ Examples of queries that should use this tool:
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[Tool: search_sessions] Voyage embedding failed: ${msg}`);
-        return { results: [], total: 0, query, security_filter: sessionSecurityFilter };
+        return {
+          results: [], total: 0, query,
+          security_context: {
+            principal: { id: session.id, tenantId: session.tenantId, roles: session.roles, name: session.name },
+            toolName: "search_sessions",
+            cerbosPlanKind: planKind,
+            cerbosRawAst: rawAst,
+            compiledMongoFilter: securityFilter,
+            llmGeneratedFilter: { query, limit: safeLimit },
+            finalMongoQuery: { pipeline: [] },
+            queriedAt,
+            resultCount: 0,
+          },
+        };
       }
 
-      // Step 2: Build $vectorSearch pipeline
-      // - $vectorSearch must be first stage (per MCP aggregate tool docs)
-      // - filter uses Cerbos-derived security boundary (tenant_id + agent_id)
-      // - $unset at end is mandatory per mongodb-mcp-server docs to avoid context bloat
+      // ── Step 2: Build $vectorSearch pipeline ────────────────────────────────
+      // $vectorSearch must be first stage (per MCP aggregate tool docs).
+      // filter = Cerbos-compiled security boundary, enforced inside the ANN scan.
+      // $unset at end is mandatory to avoid sending binary embeddings to the LLM.
       const pipeline = [
         {
           $vectorSearch: {
             index: VECTOR_INDEX_NAME,
             path: "embedding",
-            queryVector,                                    // real float array from Voyage
+            queryVector,
             numCandidates: Math.max(safeLimit * 20, 100),
             limit: safeLimit,
-            filter: sessionSecurityFilter,                 // Cerbos boundary inside ANN scan
+            filter: securityFilter,
           },
         },
-        {
-          $addFields: { score: { $meta: "vectorSearchScore" } },
-        },
-        {
-          // Remove heavy fields — embedding binary + raw transcript never sent to LLM
-          $unset: ["embedding", "raw_transcript"],
-        },
+        { $addFields: { score: { $meta: "vectorSearchScore" } } },
+        { $unset: ["embedding", "raw_transcript"] },
       ];
 
-      // Step 3: Call MCP aggregate tool with the chat_sessions collection
+      // ── Step 3: Call MCP aggregate on chat_sessions ─────────────────────────
       let results: SessionSearchResult[] = [];
       try {
         const mcpResult = await callMcpAggregate(pipeline);
@@ -281,18 +356,29 @@ Examples of queries that should use this tool:
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[Tool: search_sessions] MCP aggregate failed: ${msg}`);
-        // Return empty results rather than crashing the chat stream
-        return { results: [], total: 0, query, security_filter: sessionSecurityFilter };
       }
 
       console.log(`${"═".repeat(60)}\n`);
 
-      return {
-        results,
-        total: results.length,
-        query,
-        security_filter: sessionSecurityFilter,
+      // ── Gap 2 Fix: build full SecurityContext so the analytics panel works ──
+      const security_context: SecurityContext = {
+        principal: {
+          id: session.id,
+          tenantId: session.tenantId,
+          roles: session.roles,
+          name: session.name,
+        },
+        toolName: "search_sessions",
+        cerbosPlanKind: planKind,
+        cerbosRawAst: rawAst,
+        compiledMongoFilter: securityFilter,         // Cerbos-compiled filter → Step 1 in panel
+        llmGeneratedFilter: { query, limit: safeLimit }, // what LLM passed → Step 2 in panel
+        finalMongoQuery: { pipeline },               // full $vectorSearch pipeline → Step 3 in panel
+        queriedAt,
+        resultCount: results.length,
       };
+
+      return { results, total: results.length, query, security_context };
     },
   });
 
@@ -311,7 +397,7 @@ Examples of queries that should use this tool:
     system: buildSystemPrompt(session),
     messages: convertToCoreMessages(body.messages as Parameters<typeof convertToCoreMessages>[0]),
     tools: allTools,
-    maxSteps: 8,
+    maxSteps: 10,
     temperature: 0.1,
     onStepFinish: async ({ toolResults }) => {
       if (!toolResults?.length) return;
@@ -325,29 +411,34 @@ Examples of queries that should use this tool:
           ) as JSONValue;
           streamData.append(annotation);
         }
-        // Stream session search results as a separate annotation type
+        // Stream SecurityContext for search_sessions — same annotation type as MCP tools
+        // so the existing useEffect in the UI picks it up without any changes.
         if (tr.toolName === "search_sessions") {
           const toolResult = tr.result as SessionSearchToolResult;
-          if (!toolResult) continue;
+          if (!toolResult?.security_context) continue;
           const annotation = JSON.parse(
-            JSON.stringify({ type: "session_search_result", payload: toolResult })
+            JSON.stringify({ type: "security_context", payload: toolResult.security_context })
           ) as JSONValue;
           streamData.append(annotation);
         }
       }
     },
-    onFinish: async () => {
-      try {
-        if (_connectionId && _connectionId !== "preconfigured") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const tools = await (_mcpClient as any).tools?.();
-          if (tools?.disconnect) {
-            await tools.disconnect.execute({ connectionId: _connectionId }, { abortSignal: undefined });
+    onFinish: () => {
+      // Fire cleanup as a detached promise so the stream response is not blocked.
+      // streamData.close() is in finally — guaranteed to run regardless of errors.
+      void (async () => {
+        try {
+          if (_connectionId && _connectionId !== "preconfigured") {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tools = await (_mcpClient as any).tools?.();
+            if (tools?.disconnect) {
+              await tools.disconnect.execute({ connectionId: _connectionId }, { abortSignal: undefined });
+            }
           }
-        }
-      } catch { /* ignore disconnect errors */ }
-      try { await _mcpClient.close(); } catch { /* ignore close errors */ }
-      streamData.close();
+        } catch { /* ignore disconnect errors */ }
+        try { await _mcpClient.close(); } catch { /* ignore close errors */ }
+        finally { streamData.close(); }
+      })();
     },
   });
 

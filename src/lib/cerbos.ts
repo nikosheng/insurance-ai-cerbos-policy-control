@@ -30,5 +30,6 @@ export function buildCerbosPrincipal(session: AgentSession) {
   };
 }
 
-// ─── Resource Kind ────────────────────────────────────────────────────────────
+// ─── Resource Kinds ───────────────────────────────────────────────────────────
 export const INSURANCE_POLICY_RESOURCE_KIND = "insurance_policy";
+export const CHAT_SESSION_RESOURCE_KIND     = "chat_session";

@@ -44,14 +44,28 @@ YOUR ROLE:
   let them know you'll follow up or connect them to the right team.
 - Keep responses concise and friendly. Use bullet points for policy details.
 
-TOOLS AVAILABLE:
-- find: Look up the customer's policy records. Use filter '{}' to get all their policies.
-- count: Count how many policies they have.
-- collection_schema: Check available fields (use internally, don't mention to customer).
+TOOLS AVAILABLE AND HOW TO USE THEM:
+Always call collection_schema before calling find or count, to verify the exact
+field names. Do not reveal internal field names to the customer in your response.
+
+- collection_schema: Call this first before any data lookup to confirm field names.
+  Known fields (verify before use):
+    policy_type      — "Auto" | "Home" | "Life"
+    status           — "Active" | "Pending" | "Cancelled" | "Expired"
+    coverage_amount  — numeric dollars
+    premium_monthly  — numeric monthly dollars
+    deductible       — numeric dollars
+    start_date       — ISO date "YYYY-MM-DD"
+    end_date         — ISO date "YYYY-MM-DD"
+    notes            — free text
+
+- find: Look up the customer's policy records. ALWAYS call collection_schema first.
+  Use filter '{}' to get all their policies, or filter by policy_type/status/dates.
+  NEVER include client_name, tenant_id, or agent_id in filters — enforced automatically.
+
+- count: Count how many policies they have. ALWAYS call collection_schema first.
 
 IMPORTANT SECURITY:
-- NEVER include client_name, tenant_id, or any identity field in tool filters —
-  those are automatically enforced. Just use '{}' or filter by policy_type/status/dates.
 - The customer can ONLY see their own policies — the system guarantees this.
 - DO NOT reveal internal field names (client_name, tenant_id, agent_id) to the customer.
 
@@ -105,7 +119,7 @@ export async function POST(req: NextRequest) {
       body.messages as Parameters<typeof convertToCoreMessages>[0]
     ),
     tools: wrappedTools,
-    maxSteps: 6,
+    maxSteps: 8,
     temperature: 0.2,
     onStepFinish: async ({ toolResults }) => {
       // Stream security context annotations (same as agent flow)
@@ -121,18 +135,20 @@ export async function POST(req: NextRequest) {
         streamData.append(annotation);
       }
     },
-    onFinish: async () => {
-      try {
-        if (_connectionId && _connectionId !== "preconfigured") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const tools = await (_mcpClient as any).tools?.();
-          if (tools?.disconnect) {
-            await tools.disconnect.execute({ connectionId: _connectionId }, { abortSignal: undefined });
+    onFinish: () => {
+      void (async () => {
+        try {
+          if (_connectionId && _connectionId !== "preconfigured") {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tools = await (_mcpClient as any).tools?.();
+            if (tools?.disconnect) {
+              await tools.disconnect.execute({ connectionId: _connectionId }, { abortSignal: undefined });
+            }
           }
-        }
-      } catch { /* ignore */ }
-      try { await _mcpClient.close(); } catch { /* ignore */ }
-      streamData.close();
+        } catch { /* ignore */ }
+        try { await _mcpClient.close(); } catch { /* ignore */ }
+        finally { streamData.close(); }
+      })();
     },
   });
 
