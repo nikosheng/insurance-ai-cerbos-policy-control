@@ -1,3 +1,26 @@
+// ─── Customer Session ─────────────────────────────────────────────────────────
+// Stored in a separate httpOnly cookie (insurance_customer_session).
+// Never collides with the agent session cookie.
+export interface CustomerSession {
+  clientId: string;       // slug: "alice-johnson" — Cerbos P.id
+  clientName: string;     // "Alice Johnson" — Cerbos P.attr.client_name
+  clientEmail: string;    // "alice.johnson@email.com"
+  agentId: string;        // "agent_1" — whose MCP connection + persona to use
+  agentName: string;      // "Sarah Chen" — shown in UI + AI persona
+  tenantId: string;       // "Tenant_A" — Cerbos P.attr.tenant_id
+  roles: string[];        // ["customer"]
+}
+
+// ─── Chat Session Types ───────────────────────────────────────────────────────
+export type {
+  ChatSession,
+  EndSessionRequest,
+  EndSessionResponse,
+  SessionSearchRequest,
+  SessionSearchResult,
+  SessionSummaryOutput,
+} from "./chat-session";
+
 // ─── Agent Session ─────────────────────────────────────────────────────────────
 // Stored in the httpOnly session cookie; never exposed to the LLM as tool input.
 export interface AgentSession {

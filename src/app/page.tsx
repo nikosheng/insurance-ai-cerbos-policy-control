@@ -11,6 +11,8 @@ import {
   AlertCircle,
   CheckCircle2,
   FileText,
+  MessageCircle,
+  Users,
 } from "lucide-react";
 import { AGENT_REGISTRY, TEST_SCENARIOS } from "@/lib/agents";
 import type { AgentId } from "@/lib/agents";
@@ -249,6 +251,51 @@ export default function LoginPage() {
                 isLoading={loadingAgent !== null}
               />
             ))}
+          </div>
+
+          {/* ── Customer Portal entry ────────────────────────────────────── */}
+          <div className="mb-8 relative overflow-hidden rounded-2xl border border-sky-500/20 bg-gradient-to-r from-sky-950/60 via-slate-900/80 to-sky-950/60">
+            {/* subtle glow line */}
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-sky-500/50 to-transparent" />
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5 px-6 py-5">
+              {/* icon */}
+              <div className="flex-shrink-0 w-12 h-12 rounded-2xl bg-sky-600/15 border border-sky-500/25 flex items-center justify-center">
+                <MessageCircle className="w-6 h-6 text-sky-400" />
+              </div>
+              {/* text */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <p className="text-zinc-100 text-sm font-semibold">Customer Portal</p>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-300 font-mono">
+                    New
+                  </span>
+                </div>
+                <p className="text-zinc-500 text-xs leading-relaxed">
+                  Experience the chat from a customer&apos;s perspective. Select your name, chat with
+                  your assigned agent (powered by AI), and ask about your policies.
+                  Cerbos enforces that you can only see your own data — even if the AI tries to fetch more.
+                </p>
+                <div className="flex flex-wrap gap-3 mt-2.5">
+                  <div className="flex items-center gap-1.5 text-zinc-600 text-xs">
+                    <Users className="w-3 h-3" />
+                    <span>20 mock customers across 3 agents</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-zinc-600 text-xs">
+                    <Shield className="w-3 h-3" />
+                    <span>Cerbos role: <code className="font-mono text-zinc-500">customer</code></span>
+                  </div>
+                </div>
+              </div>
+              {/* CTA */}
+              <a
+                href="/customer"
+                className="flex-shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-all shadow-lg shadow-sky-500/20 focus:outline-none focus:ring-2 focus:ring-sky-500/50"
+              >
+                <MessageCircle className="w-3.5 h-3.5" />
+                Open Customer Portal
+                <ChevronRight className="w-3.5 h-3.5" />
+              </a>
+            </div>
           </div>
 
           {/* ── Security info strip ──────────────────────────────────────── */}

@@ -3,7 +3,7 @@ import { createMCPClient } from "@ai-sdk/mcp";
 import { getCerbosClient, buildCerbosPrincipal, INSURANCE_POLICY_RESOURCE_KIND } from "@/lib/cerbos";
 import { planResponseToMongoFilter } from "@/lib/ast-to-mongo";
 import { mergeFilters } from "@/lib/db";
-import type { AgentSession, InsurancePolicy, McpToolResult, SecurityContext } from "@/types";
+import type { AgentSession, CustomerSession, InsurancePolicy, McpToolResult, SecurityContext } from "@/types";
 
 // Re-export browser-safe static data so other server-side files can import
 // from a single location without pulling in the Node.js-only DB layer.
@@ -97,6 +97,41 @@ async function buildCerbosContext(session: AgentSession): Promise<CerbosContext>
 
   const { filter: securityFilter, planKind, rawAst } = planResponseToMongoFilter(planResponse);
   console.log(`[Cerbos] Plan kind: ${planKind} → filter: ${JSON.stringify(securityFilter)}`);
+  return { securityFilter, planKind, rawAst };
+}
+
+// ─── Customer Principal Builder ───────────────────────────────────────────────
+// Builds a Cerbos principal for the "customer" role.
+// P.id             = clientId slug  (e.g. "alice-johnson")
+// P.attr.tenant_id = "Tenant_A"
+// P.attr.client_name = "Alice Johnson"   ← matched by customer_own_policies rule
+//
+// The Cerbos rule compiles to: { tenant_id: "Tenant_A", client_name: "Alice Johnson" }
+// This filter is injected into every MCP tool call — customer cannot see any other row.
+
+export function buildCerbosCustomerPrincipal(session: CustomerSession) {
+  return {
+    id: session.clientId,
+    roles: session.roles,
+    attr: {
+      tenant_id: session.tenantId,
+      client_name: session.clientName,
+    },
+  };
+}
+
+async function buildCerbosContextForCustomer(session: CustomerSession): Promise<CerbosContext> {
+  const cerbos = getCerbosClient();
+  const principal = buildCerbosCustomerPrincipal(session);
+
+  const planResponse = await cerbos.planResources({
+    principal,
+    resource: { kind: INSURANCE_POLICY_RESOURCE_KIND },
+    action: "read",
+  });
+
+  const { filter: securityFilter, planKind, rawAst } = planResponseToMongoFilter(planResponse);
+  console.log(`[Cerbos/Customer] Plan kind: ${planKind} → filter: ${JSON.stringify(securityFilter)}`);
   return { securityFilter, planKind, rawAst };
 }
 
@@ -581,3 +616,248 @@ Use this to understand which fields are indexed for efficient querying.`,
 // Used by the chat route's onStepFinish to detect which tool calls carry
 // SecurityContext telemetry that should be streamed to the analytics panel.
 export const DATA_TOOL_NAMES = new Set(["find", "aggregate", "count"]);
+
+// ─── Customer SecurityContext builder ─────────────────────────────────────────
+function buildSecurityContextForCustomer(
+  session: CustomerSession,
+  toolName: string,
+  cerbos: CerbosContext,
+  llmGeneratedFilter: Record<string, unknown>,
+  finalMongoQuery: Record<string, unknown>,
+  resultCount: number,
+  queriedAt: string
+): SecurityContext {
+  return {
+    principal: {
+      id: session.clientId,
+      tenantId: session.tenantId,
+      roles: session.roles,
+      name: session.clientName,
+    },
+    toolName,
+    cerbosPlanKind: cerbos.planKind,
+    cerbosRawAst: cerbos.rawAst,
+    compiledMongoFilter: cerbos.securityFilter,
+    llmGeneratedFilter,
+    finalMongoQuery,
+    queriedAt,
+    resultCount,
+  };
+}
+
+// ─── Cerbos-Wrapped Tools for Customer portal ─────────────────────────────────
+// Same architecture as createCerbosWrappedTools, but:
+//   - Principal has role "customer" + attr.client_name instead of agent_id
+//   - Cerbos compiles to { tenant_id, client_name } filter (not agent_id)
+//   - Only find + count exposed — customers don't need aggregate for the demo
+//   - collection_schema passthrough still included so AI can inspect fields
+
+export async function createCerbosWrappedToolsForCustomer(session: CustomerSession) {
+  const mcpServerUrl = process.env.MDB_MCP_SERVER_URL;
+  if (!mcpServerUrl) throw new Error("MDB_MCP_SERVER_URL is not set.");
+
+  const mongoUri = process.env.MONGODB_URI;
+  if (!mongoUri) throw new Error("MONGODB_URI is not set.");
+
+  const mcpClient = await createMCPClient({
+    transport: { type: "http", url: mcpServerUrl },
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mcpTools = await mcpClient.tools() as Record<string, any>;
+
+  const db = DB_NAME();
+  let connectionId = CONNECTION_ID;
+
+  try {
+    const connectResult = await mcpTools["connect"].execute(
+      { connectionString: mongoUri, connectionName: `customer-${session.clientId}` },
+      { abortSignal: undefined }
+    );
+    const responseText = connectResult.content
+      ?.filter((b: { type: string }) => b.type === "text")
+      .map((b: { text?: string }) => b.text ?? "")
+      .join(" ") ?? "";
+
+    const idMatch = responseText.match(/connectionId[^"]*"([a-f0-9-]{36})"/i)
+      || responseText.match(/"([a-f0-9-]{36})"/);
+    if (idMatch) {
+      connectionId = idMatch[1];
+      console.log(`[MCP/Customer] Connected. connectionId: ${connectionId}`);
+    }
+  } catch (connErr) {
+    console.warn("[MCP/Customer] connect error:", connErr);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function callRealTool(name: string, args: Record<string, unknown>): Promise<any> {
+    const realTool = mcpTools[name];
+    if (!realTool) throw new Error(`mongodb-mcp-server did not expose tool "${name}"`);
+    return realTool.execute(args, { abortSignal: undefined });
+  }
+
+  function deniedResult(toolName: string, llmFilter: Record<string, unknown>, queriedAt: string): McpToolResult {
+    return {
+      documents: [],
+      security_context: {
+        principal: { id: session.clientId, tenantId: session.tenantId, roles: session.roles, name: session.clientName },
+        toolName,
+        cerbosPlanKind: "CERBOS_UNREACHABLE",
+        cerbosRawAst: null,
+        compiledMongoFilter: { _id: { $in: [] } },
+        llmGeneratedFilter: llmFilter,
+        finalMongoQuery: { _id: { $in: [] } },
+        queriedAt,
+        resultCount: 0,
+      },
+      total_count: 0,
+      message: "Authorization service unavailable. Access denied.",
+    };
+  }
+
+  // ── TOOL: find ───────────────────────────────────────────────────────────────
+  const findTool = tool({
+    description: `Query the customer's insurance policy documents using a MongoDB filter JSON string.
+Use this when the customer asks about their coverage, premium, deductible, policy status, or dates.
+IMPORTANT: DO NOT include client_name, tenant_id, or any identity fields — enforced automatically.
+Use '{}' to return all policies for this customer.
+
+Examples:
+  '{}' — all policies
+  '{ "status": "Active" }' — active policies only
+  '{ "policy_type": "Auto" }' — auto policies`,
+
+    parameters: jsonSchema<{ filter_json: string; limit: number }>({
+      type: "object",
+      properties: {
+        filter_json: {
+          type: "string",
+          description: "MongoDB filter as JSON string. Do NOT include client_name or tenant_id. Use '{}' for all.",
+          default: "{}",
+        },
+        limit: {
+          type: "number",
+          description: "Max documents to return. Default 20.",
+          default: 20,
+        },
+      },
+      required: ["filter_json", "limit"],
+      additionalProperties: false,
+    }),
+
+    execute: async (args): Promise<McpToolResult> => {
+      const queriedAt = new Date().toISOString();
+      let llmFilter: Record<string, unknown> = {};
+      try { llmFilter = JSON.parse(args.filter_json || "{}"); } catch { llmFilter = {}; }
+
+      console.log(`[Customer Tool: find] ${session.clientName} @ ${session.tenantId}`);
+
+      let cerbos: CerbosContext;
+      try {
+        cerbos = await buildCerbosContextForCustomer(session);
+      } catch (err) {
+        console.error("[Cerbos/Customer] PDP unreachable:", err);
+        return deniedResult("find", llmFilter, queriedAt);
+      }
+
+      const finalFilter = mergeFilters(cerbos.securityFilter, llmFilter);
+      console.log(`[Customer Tool: find] Final filter: ${JSON.stringify(finalFilter)}`);
+
+      const result = await callRealTool("find", {
+        connectionId,
+        database: db,
+        collection: COLLECTION,
+        filter: finalFilter,
+        limit: args.limit ?? 20,
+      });
+
+      const docs = parseMcpContent(result.content ?? []);
+      return {
+        documents: docs,
+        security_context: buildSecurityContextForCustomer(
+          session, "find", cerbos, llmFilter, finalFilter, docs.length, queriedAt
+        ),
+        total_count: docs.length,
+        message: docs.length === 0
+          ? "No policies found."
+          : `Found ${docs.length} policy record${docs.length > 1 ? "s" : ""}.`,
+      };
+    },
+  });
+
+  // ── TOOL: count ──────────────────────────────────────────────────────────────
+  const countTool = tool({
+    description: `Count the customer's insurance policy documents. Use for "how many policies" questions.
+DO NOT include client_name or tenant_id — enforced automatically.`,
+
+    parameters: jsonSchema<{ query_json: string }>({
+      type: "object",
+      properties: {
+        query_json: {
+          type: "string",
+          description: "MongoDB filter for counting as JSON string. Use '{}' for all.",
+          default: "{}",
+        },
+      },
+      required: ["query_json"],
+      additionalProperties: false,
+    }),
+
+    execute: async (args): Promise<McpToolResult> => {
+      const queriedAt = new Date().toISOString();
+      let llmQuery: Record<string, unknown> = {};
+      try { llmQuery = JSON.parse(args.query_json || "{}"); } catch { llmQuery = {}; }
+
+      let cerbos: CerbosContext;
+      try {
+        cerbos = await buildCerbosContextForCustomer(session);
+      } catch (err) {
+        console.error("[Cerbos/Customer] PDP unreachable:", err);
+        return deniedResult("count", llmQuery, queriedAt);
+      }
+
+      const finalQuery = mergeFilters(cerbos.securityFilter, llmQuery);
+      const result = await callRealTool("count", {
+        connectionId, database: db, collection: COLLECTION, query: finalQuery,
+      });
+
+      let count = 0;
+      if (result.content?.[0]?.text) {
+        const match = result.content[0].text.match(/(\d+)/);
+        if (match) count = parseInt(match[1], 10);
+      }
+
+      return {
+        documents: [],
+        security_context: buildSecurityContextForCustomer(
+          session, "count", cerbos, llmQuery, finalQuery, count, queriedAt
+        ),
+        total_count: count,
+        message: `You have ${count} policy record${count !== 1 ? "s" : ""} matching your query.`,
+      };
+    },
+  });
+
+  // ── TOOL: collection_schema (passthrough) ────────────────────────────────────
+  const collectionSchemaTool = tool({
+    description: "Describe the available fields in the insurance policy records. Use before querying if unsure of field names.",
+    parameters: jsonSchema<Record<string, never>>({
+      type: "object", properties: {}, required: [], additionalProperties: false,
+    }),
+    execute: async (): Promise<{ schema: unknown; message: string }> => {
+      const result = await callRealTool("collection-schema", {
+        connectionId, database: db, collection: COLLECTION,
+      });
+      const text = result.content?.map((b: { text?: string }) => b.text).join("\n") ?? "";
+      return { schema: text, message: "Schema retrieved." };
+    },
+  });
+
+  return {
+    find: findTool,
+    count: countTool,
+    collection_schema: collectionSchemaTool,
+    _mcpClient: mcpClient,
+    _connectionId: connectionId,
+  };
+}

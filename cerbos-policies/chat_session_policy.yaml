@@ -1,0 +1,51 @@
+---
+# ─── Chat Session Resource Policy ─────────────────────────────────────────────
+# Controls access to documents in the `chat_sessions` collection.
+#
+# Ownership model:
+#   - insurance_agent: owns their own sessions (tenant_id AND agent_id must match)
+#     → $vectorSearch filter: { tenant_id: P.attr.tenant_id, agent_id: P.id }
+#
+#   - tenant_admin: can read/search any session within their tenant
+#     → $vectorSearch filter: { tenant_id: P.attr.tenant_id }
+#
+# NOTE: write actions (create) are handled server-side by /api/chat-session —
+# no ALLOW rule is needed here for writes (default-deny covers them).
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: chat_session
+  version: default
+
+  rules:
+    # ── Rule 1: insurance_agent — read/search own sessions only ───────────────
+    # Both tenant_id AND agent_id must match. An agent can only retrieve sessions
+    # they personally created — no cross-agent visibility within the same tenant.
+    - name: agent_own_sessions
+      actions:
+        - read
+        - list
+        - search
+      effect: EFFECT_ALLOW
+      roles:
+        - insurance_agent
+      condition:
+        match:
+          all:
+            of:
+              - expr: R.attr.tenant_id == P.attr.tenant_id
+              - expr: R.attr.agent_id == P.id
+
+    # ── Rule 2: tenant_admin — read/search any session in their tenant ────────
+    # Only tenant_id is checked. Admin for Tenant_A sees ALL Tenant_A chat
+    # sessions across every agent, but ZERO sessions from Tenant_B.
+    - name: admin_tenant_sessions
+      actions:
+        - read
+        - list
+        - search
+      effect: EFFECT_ALLOW
+      roles:
+        - tenant_admin
+      condition:
+        match:
+          expr: R.attr.tenant_id == P.attr.tenant_id

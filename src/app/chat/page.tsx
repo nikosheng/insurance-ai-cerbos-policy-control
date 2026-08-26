@@ -13,7 +13,6 @@ import {
   User,
   Bot,
   ChevronDown,
-  ChevronRight,
   Database,
   Lock,
   Cpu,
@@ -23,17 +22,23 @@ import {
   FileText,
   Loader2,
   RefreshCw,
-  Building2,
   Copy,
   Check,
   Terminal,
+  Search,
+  Clock,
+  ListChecks,
+  MessageSquare,
 } from "lucide-react";
 import { AGENT_REGISTRY, TEST_SCENARIOS } from "@/lib/agents";
 import type { AgentId } from "@/lib/agents";
-import type { AgentSession, SecurityContext, InsurancePolicy, McpToolResult, ChatDataAnnotation } from "@/types";
+import type { AgentSession, SecurityContext, InsurancePolicy, McpToolResult, ChatDataAnnotation, SessionSearchResult } from "@/types";
+import type { SessionSearchToolResult } from "@/app/api/chat/route";
 
 // Tools that carry SecurityContext telemetry
 const DATA_TOOL_NAMES = new Set(["find", "aggregate", "count"]);
+// search_sessions tool name constant
+const SEARCH_SESSIONS_TOOL = "search_sessions";
 
 // ─── JSON Syntax Highlighter ──────────────────────────────────────────────────
 function JsonHighlight({ data }: { data: unknown }) {
@@ -171,6 +176,64 @@ function PolicyCard({ policy }: { policy: InsurancePolicy }) {
           <p className="text-zinc-300 font-mono font-medium">${policy.deductible}</p>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Session Result Card ──────────────────────────────────────────────────────
+// Rendered inline in the chat when the search_sessions tool returns results.
+function SessionResultCard({ result }: { result: SessionSearchResult }) {
+  const scorePct = typeof result.score === "number" ? (result.score * 100).toFixed(1) : null;
+  return (
+    <div className="bg-zinc-900 border border-amber-500/20 rounded-lg p-3 text-xs space-y-2">
+      {/* Header row */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <MessageSquare className="w-3 h-3 text-amber-400 flex-shrink-0" />
+            <p className="text-zinc-200 font-semibold truncate">{result.customer_name}</p>
+          </div>
+          {result.customer_policy_number && (
+            <p className="text-zinc-600 font-mono text-[10px]">{result.customer_policy_number}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {scorePct && (
+            <span className="bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[10px] px-1.5 py-0.5 rounded font-mono">
+              {scorePct}%
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Date */}
+      <div className="flex items-center gap-1 text-zinc-600 text-[10px] font-mono">
+        <Clock className="w-2.5 h-2.5 flex-shrink-0" />
+        {new Date(result.ended_at).toLocaleDateString(undefined, {
+          month: "short", day: "numeric", year: "numeric",
+        })}
+      </div>
+
+      {/* Summary */}
+      <p className="text-zinc-400 leading-relaxed line-clamp-3">{result.summary}</p>
+
+      {/* Follow-up actions */}
+      {result.follow_up_actions?.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1 text-zinc-600 text-[10px] font-mono uppercase tracking-wider mb-1">
+            <ListChecks className="w-2.5 h-2.5" />
+            Follow-up actions
+          </div>
+          <ul className="space-y-0.5">
+            {result.follow_up_actions.map((action, i) => (
+              <li key={i} className="flex items-start gap-1.5 text-amber-400">
+                <span className="text-amber-600 flex-shrink-0 mt-px">›</span>
+                {action}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -325,6 +388,13 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [securityCtx, setSecurityCtx] = useState<SecurityContext | null>(null);
   const [showTestPanel, setShowTestPanel] = useState(false);
+
+  // ── Session Search panel state ──────────────────────────────────────────
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResults, setSearchResults] = useState<SessionSearchResult[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Tracks the index of the last streamData annotation we already processed.
@@ -394,6 +464,32 @@ export default function ChatPage() {
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
   }, [input]);
+
+  // ── Session Search handler ──────────────────────────────────────────────
+  const handleSearch = useCallback(async () => {
+    if (!searchQuery.trim() || searchLoading) return;
+    setSearchLoading(true);
+    setSearchError(null);
+    setSearchResults(null);
+    try {
+      const res = await fetch("/api/chat-session/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: searchQuery.trim(), limit: 5 }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json();
+        throw new Error(error ?? `HTTP ${res.status}`);
+      }
+      const { results } = await res.json();
+      setSearchResults(results as SessionSearchResult[]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSearchError(msg);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [searchQuery, searchLoading]);
 
   const handleSubmit = useCallback(
     async (e?: React.FormEvent) => {
@@ -610,17 +706,22 @@ export default function ChatPage() {
                 </p>
                 <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-sm">
                   {[
-                    "Show me all my clients' policies",
-                    "Which policies expire before 2027?",
-                    "How many active auto policies do I have?",
-                    "Summarize my portfolio by policy type",
-                  ].map((suggestion) => (
+                    { text: "Show me all my clients' policies", type: "policy" },
+                    { text: "Which policies expire before 2027?", type: "policy" },
+                    { text: "Any past sessions about claim disputes?", type: "search" },
+                    { text: "Show me pending follow-up actions from past chats", type: "search" },
+                  ].map(({ text, type }) => (
                     <button
-                      key={suggestion}
-                      onClick={() => setInput(suggestion)}
-                      className="text-xs text-left px-3 py-2.5 rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800 transition-all"
+                      key={text}
+                      onClick={() => setInput(text)}
+                      className={`text-xs text-left px-3 py-2.5 rounded-xl border bg-zinc-900 transition-all ${
+                        type === "search"
+                          ? "border-amber-800/40 text-amber-600/80 hover:text-amber-400 hover:border-amber-600/50 hover:bg-zinc-800"
+                          : "border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800"
+                      }`}
                     >
-                      {suggestion}
+                      {type === "search" && <MessageSquare className="w-3 h-3 inline mr-1 opacity-60" />}
+                      {text}
                     </button>
                   ))}
                 </div>
@@ -656,6 +757,8 @@ export default function ChatPage() {
                         {/* Tool invocation indicators */}
                         {toolCallParts.length > 0 && toolCallParts.map((tc, ti) => {
                           const isDataTool = DATA_TOOL_NAMES.has(tc.toolName);
+                          const isSearchTool = tc.toolName === SEARCH_SESSIONS_TOOL;
+
                           // Pretty-print the key arg for each tool type
                           const argPreview = (() => {
                             const a = tc.args as Record<string, unknown> | undefined;
@@ -670,25 +773,35 @@ export default function ChatPage() {
                             }
                             if (tc.toolName === "count" && a.query_json)
                               return `query: ${String(a.query_json).slice(0, 80)}`;
+                            if (tc.toolName === SEARCH_SESSIONS_TOOL && a.query)
+                              return `"${String(a.query).slice(0, 80)}"`;
                             return JSON.stringify(a).slice(0, 80);
                           })();
 
+                          const borderCls = isDataTool
+                            ? "border-indigo-500/20"
+                            : isSearchTool
+                              ? "border-amber-500/20"
+                              : "border-zinc-800";
+
                           return (
-                            <div key={ti} className={`flex items-start gap-2 bg-zinc-900/60 border rounded-xl px-3 py-2.5 ${
-                              isDataTool ? "border-indigo-500/20" : "border-zinc-800"
-                            }`}>
+                            <div key={ti} className={`flex items-start gap-2 bg-zinc-900/60 border rounded-xl px-3 py-2.5 ${borderCls}`}>
                               {tc.state === "call" ? (
                                 <>
-                                  <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin flex-shrink-0 mt-0.5" />
+                                  <Loader2 className={`w-3.5 h-3.5 animate-spin flex-shrink-0 mt-0.5 ${isSearchTool ? "text-amber-400" : "text-indigo-400"}`} />
                                   <div className="flex-1 min-w-0">
                                     <p className="text-zinc-300 text-xs font-mono">
-                                      <span className="text-indigo-300">{tc.toolName}</span>
+                                      <span className={isSearchTool ? "text-amber-300" : "text-indigo-300"}>{tc.toolName}</span>
                                       {argPreview && (
                                         <span className="text-zinc-500"> ({argPreview})</span>
                                       )}
                                     </p>
                                     <p className="text-zinc-600 text-xs mt-0.5">
-                                      {isDataTool ? "Injecting Cerbos filter → Querying MongoDB..." : "Fetching schema info..."}
+                                      {isDataTool
+                                        ? "Injecting Cerbos filter → Querying MongoDB..."
+                                        : isSearchTool
+                                          ? "Embedding query → $vectorSearch on chat_sessions..."
+                                          : "Fetching schema info..."}
                                     </p>
                                   </div>
                                 </>
@@ -696,7 +809,29 @@ export default function ChatPage() {
                                 <>
                                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
                                   <div className="flex-1 min-w-0">
-                                    {isDataTool ? (() => {
+                                    {isSearchTool ? (() => {
+                                      const res = tc.result as SessionSearchToolResult | undefined;
+                                      const results = res?.results ?? [];
+                                      return (
+                                        <>
+                                          <p className="text-zinc-300 text-xs font-mono mb-2">
+                                            <span className="text-amber-300">search_sessions</span>
+                                            {" → "}
+                                            <span className="text-emerald-400">
+                                              {results.length} session{results.length !== 1 ? "s" : ""} found
+                                            </span>
+                                          </p>
+                                          {/* Session result cards inline in chat */}
+                                          {results.length > 0 && (
+                                            <div className="space-y-1.5">
+                                              {results.map((r, ri) => (
+                                                <SessionResultCard key={ri} result={r} />
+                                              ))}
+                                            </div>
+                                          )}
+                                        </>
+                                      );
+                                    })() : isDataTool ? (() => {
                                       const res = tc.result as McpToolResult | undefined;
                                       const count = res?.total_count ?? 0;
                                       const docs = res?.documents ?? [];
@@ -739,7 +874,7 @@ export default function ChatPage() {
                                 <>
                                   <XCircle className="w-3.5 h-3.5 text-red-400 flex-shrink-0 mt-0.5" />
                                   <p className="text-zinc-400 text-xs font-mono">
-                                    <span className="text-indigo-300">{tc.toolName}</span> — failed
+                                    <span className={isSearchTool ? "text-amber-300" : "text-indigo-300"}>{tc.toolName}</span> — failed
                                   </p>
                                 </>
                               )}
@@ -1144,6 +1279,121 @@ export default function ChatPage() {
                     <span className={color}>{label}</span>
                   </div>
                 ))}
+              </div>
+            </PanelSection>
+
+            {/* ── 6. Session Search ─────────────────────────────────────── */}
+            <PanelSection
+              title="Session Search"
+              icon={Search}
+              accentColor="amber"
+              defaultOpen={false}
+            >
+              <div className="space-y-3">
+                <p className="text-zinc-600 text-xs leading-relaxed">
+                  Semantic search across past customer service sessions.
+                  Results are filtered to your authorised scope by Cerbos.
+                </p>
+
+                {/* Search input */}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                    placeholder="e.g. claim dispute, renewal issue..."
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 transition-all min-w-0"
+                  />
+                  <button
+                    onClick={handleSearch}
+                    disabled={!searchQuery.trim() || searchLoading}
+                    className="flex-shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {searchLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Search className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Error */}
+                {searchError && (
+                  <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg p-2.5 text-xs text-red-400">
+                    <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    {searchError}
+                  </div>
+                )}
+
+                {/* Results */}
+                {searchResults !== null && (
+                  searchResults.length === 0 ? (
+                    <div className="text-center py-4">
+                      <p className="text-zinc-600 text-xs">No matching sessions found.</p>
+                      <p className="text-zinc-700 text-xs mt-0.5">Try different search terms.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {searchResults.map((result) => (
+                        <div
+                          key={result.session_id}
+                          className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 space-y-2"
+                        >
+                          {/* Header */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-zinc-200 text-xs font-semibold truncate">{result.customer_name}</p>
+                              {result.customer_policy_number && (
+                                <p className="text-zinc-600 text-xs font-mono">{result.customer_policy_number}</p>
+                              )}
+                            </div>
+                            <span className="flex-shrink-0 bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[10px] px-1.5 py-0.5 rounded font-mono">
+                              {(result.score * 100).toFixed(1)}%
+                            </span>
+                          </div>
+
+                          {/* Date */}
+                          <div className="flex items-center gap-1 text-zinc-600 text-[10px] font-mono">
+                            <Clock className="w-2.5 h-2.5 flex-shrink-0" />
+                            {new Date(result.ended_at).toLocaleDateString(undefined, {
+                              month: "short", day: "numeric", year: "numeric",
+                            })}
+                          </div>
+
+                          {/* Summary */}
+                          <p className="text-zinc-400 text-xs leading-relaxed line-clamp-3">{result.summary}</p>
+
+                          {/* Follow-up actions */}
+                          {result.follow_up_actions.length > 0 && (
+                            <div>
+                              <div className="flex items-center gap-1 text-zinc-600 text-[10px] font-mono uppercase tracking-wider mb-1">
+                                <ListChecks className="w-2.5 h-2.5" />
+                                Follow-up actions
+                              </div>
+                              <ul className="space-y-0.5">
+                                {result.follow_up_actions.map((action, i) => (
+                                  <li key={i} className="flex items-start gap-1.5 text-[11px] text-amber-400">
+                                    <span className="text-amber-600 flex-shrink-0 mt-px">›</span>
+                                    {action}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                )}
+
+                {/* Empty state before search */}
+                {searchResults === null && !searchLoading && !searchError && (
+                  <div className="text-center py-3">
+                    <Search className="w-6 h-6 text-zinc-800 mx-auto mb-1.5" />
+                    <p className="text-zinc-700 text-xs">Search past sessions above.</p>
+                  </div>
+                )}
               </div>
             </PanelSection>
           </div>

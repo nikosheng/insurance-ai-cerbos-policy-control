@@ -29,10 +29,11 @@ help:
 	@echo "    make mcp-logs    Tail mongodb-mcp-server logs only"
 	@echo ""
 	@echo "  Database  (requires: npm run dev is running on port $(PORT))"
-	@echo "    make seed        Seed Atlas DB with 20 records (idempotent)"
-	@echo "    make reset       Drop collection and re-seed all 20 records"
-	@echo "    make db-count    Show document count per agent"
-	@echo "    make db-shell    How to open a MongoDB shell"
+	@echo "    make seed           Seed Atlas DB with 20 records (idempotent)"
+	@echo "    make reset          Drop collection and re-seed all 20 records"
+	@echo "    make db-count       Show document count per agent"
+	@echo "    make db-shell       How to open a MongoDB shell"
+	@echo "    make vector-index   Create Atlas Vector Search index (chat_sessions)"
 	@echo ""
 	@echo "  App"
 	@echo "    make install     npm install"
@@ -182,3 +183,13 @@ nuke:
 	@echo "▶ Nuking containers and volumes..."
 	docker compose down -v
 	@echo "✓ All containers and volumes removed."
+
+## Create the Atlas Vector Search index for the chat_sessions collection.
+## Requires: npm run dev is running on port $(PORT).
+## Safe to call multiple times — idempotent (checks before creating).
+## Note: index may take 1-2 minutes to become READY after creation.
+.PHONY: vector-index
+vector-index:
+	@echo "▶ Creating Atlas Vector Search index via $(APP_URL)/api/setup-vector-index ..."
+	@curl -s $(APP_URL)/api/setup-vector-index | python3 -m json.tool 2>/dev/null || curl -s $(APP_URL)/api/setup-vector-index
+	@echo ""
