@@ -173,6 +173,7 @@ export async function POST(req: NextRequest) {
       summary: summaryOutput.summary,
       follow_up_actions: summaryOutput.follow_up_actions,
       embedding,
+      source: agentSession ? "agent" : "customer",
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

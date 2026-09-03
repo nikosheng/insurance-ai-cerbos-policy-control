@@ -17,6 +17,7 @@ export interface ChatSession {
   follow_up_actions: string[];     // LLM-extracted action items
   // embedding stored as Binary.fromFloat32Array in MongoDB — omitted from API responses
   embedding_model: string;         // "voyage-4"
+  source?: "agent" | "customer";   // which portal created this session
 }
 
 // ─── End Session Request ──────────────────────────────────────────────────────

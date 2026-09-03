@@ -14,6 +14,7 @@ import { createAzure } from "@ai-sdk/azure";
 import { streamText, convertToCoreMessages, type JSONValue, StreamData } from "ai";
 import { getCustomerSessionFromRequest } from "@/lib/session";
 import { createCerbosWrappedToolsForCustomer, DATA_TOOL_NAMES } from "@/mcp/mcpServer";
+import { getRecentSessionsForCustomer, type PastSessionSummary } from "@/lib/chatSessions";
 import type { CustomerSession, McpToolResult } from "@/types";
 
 // ─── Azure provider ───────────────────────────────────────────────────────────
@@ -31,7 +32,34 @@ const MODEL = process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-5.6-luna";
 // No internal field names or MQL are mentioned. Cerbos ensures the customer
 // can only ever see their own policy data regardless of what the AI generates.
 
-function buildCustomerSystemPrompt(session: CustomerSession): string {
+function buildCustomerSystemPrompt(
+  session: CustomerSession,
+  pastSessions: PastSessionSummary[] = []
+): string {
+  const firstName = session.clientName.split(" ")[0];
+
+  // ── Past session history block ─────────────────────────────────────────────
+  let historyBlock: string;
+  if (pastSessions.length === 0) {
+    historyBlock = `CUSTOMER HISTORY:
+This appears to be ${firstName}'s first conversation with you via the customer portal. Greet them warmly and introduce yourself.`;
+  } else {
+    const sessionLines = pastSessions.map((s, i) => {
+      const date = new Date(s.ended_at).toLocaleDateString("en-US", {
+        year: "numeric", month: "long", day: "numeric",
+      });
+      const actions = s.follow_up_actions.length > 0
+        ? `Open follow-up items you committed to: ${s.follow_up_actions.join("; ")}.`
+        : "No open follow-up items from this session.";
+      return `[Previous conversation ${i + 1} — ${date}]\nSummary: ${s.summary}\n${actions}`;
+    }).join("\n\n");
+
+    historyBlock = `CUSTOMER HISTORY:
+You have spoken with ${firstName} before. Below are summaries of your most recent customer-portal conversations, newest first. Use this context to greet them naturally, reference relevant past topics if appropriate, and proactively mention any open follow-up actions you owe them — without making it feel robotic or scripted.
+
+${sessionLines}`;
+  }
+
   return `You are ${session.agentName}, a friendly and knowledgeable insurance agent at SecureInsure Corp.
 You are currently in a live chat session with your client, ${session.clientName}.
 
@@ -42,7 +70,7 @@ YOUR ROLE:
 - Explain policy details in plain, clear language — no jargon or technical field names.
 - If they ask about claims, escalate procedures, or anything not in the policy data,
   let them know you'll follow up or connect them to the right team.
-- Keep responses concise and friendly. Use bullet points for policy details.
+- Keep responses concise and friendly. Write in plain, conversational sentences — do not use markdown formatting (no asterisks, no hyphens as bullets, no pound signs for headers, no backticks). If you need to list multiple policy details, use natural prose like "Your policy covers X, Y, and Z."
 
 TOOLS AVAILABLE AND HOW TO USE THEM:
 Always call collection_schema before calling find or count, to verify the exact
@@ -71,12 +99,13 @@ IMPORTANT SECURITY:
 
 TONE:
 - Warm, professional, and reassuring.
-- Address the customer by their first name: ${session.clientName.split(" ")[0]}.
+- Address the customer by their first name: ${firstName}.
 - If they seem worried about a policy status (e.g. Expired/Cancelled), be empathetic
   and explain next steps clearly.
 
 The customer's assigned policy is under your management as ${session.agentName}.
-Start by greeting them and asking how you can help today if this is the start of the conversation.`;
+
+${historyBlock}`;
 }
 
 // ─── POST handler ─────────────────────────────────────────────────────────────
@@ -102,11 +131,34 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── 3. Build Cerbos-wrapped tools for customer role ───────────────────────
+  // ── 3. Fetch past session history (first message only) ───────────────────
+  // Only on the very first user message — the AI will carry the context forward
+  // in its own conversation history for subsequent turns in the same session.
+  const isFirstMessage = (body.messages as unknown[]).length === 1;
+  let pastSessions: PastSessionSummary[] = [];
+  if (isFirstMessage) {
+    try {
+      pastSessions = await getRecentSessionsForCustomer(
+        session.agentId,
+        session.tenantId,
+        session.clientName,
+        3
+      );
+      if (pastSessions.length > 0) {
+        console.log(
+          `[CustomerChat] Loaded ${pastSessions.length} past session(s) for ${session.clientName}`
+        );
+      }
+    } catch (err) {
+      // Non-fatal — proceed without history rather than failing the request
+      console.warn("[CustomerChat] Could not load past sessions:", err);
+    }
+  }
+
+  // ── 4. Build Cerbos-wrapped tools for customer role ───────────────────────
   const { _mcpClient, _connectionId, ...wrappedTools } =
     await createCerbosWrappedToolsForCustomer(session);
 
-  // ── 4. Stream with customer persona system prompt ─────────────────────────
   // StreamData is still used so the client can receive security annotations
   // for optional display (customer chat page doesn't show the panel, but the
   // hook still expects a data stream compatible response).
@@ -114,7 +166,7 @@ export async function POST(req: NextRequest) {
 
   const result = await streamText({
     model: azureProvider.chat(MODEL),
-    system: buildCustomerSystemPrompt(session),
+    system: buildCustomerSystemPrompt(session, pastSessions),
     messages: convertToCoreMessages(
       body.messages as Parameters<typeof convertToCoreMessages>[0]
     ),

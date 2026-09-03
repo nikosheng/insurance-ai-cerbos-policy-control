@@ -58,6 +58,7 @@ interface ChatSessionDoc {
   follow_up_actions: string[];
   embedding: Binary;       // BSON Binary (Float32 subtype 0) — voyage-4 1024 dims
   embedding_model: string;
+  source: "agent" | "customer"; // which portal created this session
 }
 
 // ─── Save Chat Session ────────────────────────────────────────────────────────
@@ -78,6 +79,7 @@ export interface SaveChatSessionParams {
   summary: string;
   follow_up_actions: string[];
   embedding: number[];     // number[1024] from Voyage API — converted here
+  source: "agent" | "customer"; // which portal created this session
 }
 
 export async function saveChatSession(params: SaveChatSessionParams): Promise<void> {
@@ -103,6 +105,7 @@ export async function saveChatSession(params: SaveChatSessionParams): Promise<vo
     follow_up_actions: params.follow_up_actions,
     embedding: embeddingBinary,
     embedding_model: VOYAGE_EMBEDDING_MODEL,
+    source: params.source,
   };
 
   await collection.insertOne(doc);
@@ -169,6 +172,55 @@ export async function vectorSearchSessions(
     follow_up_actions: doc.follow_up_actions as string[],
     embedding_model: doc.embedding_model as string,
     score: doc.score as number,
+  }));
+}
+
+// ─── Recent Customer Sessions (for agent memory) ──────────────────────────────
+// Fetches the most recent customer-portal sessions for a specific customer,
+// used to prime the agent's system prompt with conversation history.
+//
+// Scoped to source="customer" so agent-portal sessions are excluded.
+// No Cerbos check needed — the server derives the filter directly from the
+// CustomerSession cookie (agent_id + tenant_id + customer_name are all trusted).
+//
+// Returns [] gracefully if MONGODB_URI is not set (in-memory dev mode).
+
+export interface PastSessionSummary {
+  summary: string;
+  follow_up_actions: string[];
+  started_at: string;
+  ended_at: string;
+}
+
+export async function getRecentSessionsForCustomer(
+  agentId: string,
+  tenantId: string,
+  customerName: string,
+  limit = 3
+): Promise<PastSessionSummary[]> {
+  const mongoUri = process.env.MONGODB_URI;
+  if (!mongoUri) {
+    // In-memory dev mode — no chat_sessions available
+    return [];
+  }
+
+  const db = getDb();
+  const collection = db.collection<ChatSessionDoc>(CHAT_SESSIONS_COLLECTION);
+
+  const docs = await collection
+    .find(
+      { agent_id: agentId, tenant_id: tenantId, customer_name: customerName, source: "customer" },
+      { projection: { summary: 1, follow_up_actions: 1, started_at: 1, ended_at: 1, _id: 0 } }
+    )
+    .sort({ ended_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  return docs.map((doc) => ({
+    summary: doc.summary,
+    follow_up_actions: doc.follow_up_actions,
+    started_at: doc.started_at,
+    ended_at: doc.ended_at,
   }));
 }
 
