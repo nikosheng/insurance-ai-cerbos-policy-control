@@ -207,9 +207,17 @@ export async function getRecentSessionsForCustomer(
   const db = getDb();
   const collection = db.collection<ChatSessionDoc>(CHAT_SESSIONS_COLLECTION);
 
+  // Match both new documents (source: "customer") and legacy documents saved before
+  // the source field was introduced (source field absent). Agent-portal sessions
+  // saved after this feature launched carry source: "agent" and are excluded.
   const docs = await collection
     .find(
-      { agent_id: agentId, tenant_id: tenantId, customer_name: customerName, source: "customer" },
+      {
+        agent_id: agentId,
+        tenant_id: tenantId,
+        customer_name: customerName,
+        $or: [{ source: "customer" }, { source: { $exists: false } }],
+      },
       { projection: { summary: 1, follow_up_actions: 1, started_at: 1, ended_at: 1, _id: 0 } }
     )
     .sort({ ended_at: -1 })
