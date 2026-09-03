@@ -175,15 +175,25 @@ export async function vectorSearchSessions(
   }));
 }
 
-// ─── Recent Customer Sessions (for agent memory) ──────────────────────────────
-// Fetches the most recent customer-portal sessions for a specific customer,
-// used to prime the agent's system prompt with conversation history.
+// ─── Relevant Customer Sessions (for agent memory) ────────────────────────────
+// Uses Atlas $vectorSearch to retrieve the customer's past sessions that are
+// most semantically relevant to their current question, rather than just the
+// most recent ones by date.
 //
-// Scoped to source="customer" so agent-portal sessions are excluded.
-// No Cerbos check needed — the server derives the filter directly from the
-// CustomerSession cookie (agent_id + tenant_id + customer_name are all trusted).
+// This ensures specific details — amounts, dates, named topics — surface even
+// when they appeared in an older session that is not the most recent one.
 //
-// Returns [] gracefully if MONGODB_URI is not set (in-memory dev mode).
+// Requires customer_name to be declared as a "filter" field in the
+// chat_session_embedding_index definition (see setupVectorIndex below).
+//
+// Filter logic:
+//   - customer_name + agent_id + tenant_id: scopes to this customer only
+//   - source filter: accepts "customer" or absent (legacy) docs; excludes "agent"
+//     Note: $vectorSearch filter only supports simple equality / $in / $and/$or,
+//     so we query without the source filter inside $vectorSearch and post-filter.
+//
+// Falls back gracefully to [] if MONGODB_URI is not set (in-memory dev mode)
+// or if the vector index is not yet active (returns [] rather than throwing).
 
 export interface PastSessionSummary {
   summary: string;
@@ -192,7 +202,8 @@ export interface PastSessionSummary {
   ended_at: string;
 }
 
-export async function getRecentSessionsForCustomer(
+export async function getRelevantSessionsForCustomer(
+  queryVector: number[],
   agentId: string,
   tenantId: string,
   customerName: string,
@@ -205,11 +216,76 @@ export async function getRecentSessionsForCustomer(
   }
 
   const db = getDb();
+  const collection = db.collection(CHAT_SESSIONS_COLLECTION);
+
+  // $vectorSearch filter uses customer_name, agent_id, tenant_id declared as
+  // "filter" fields in the index. This scopes the ANN scan to this customer's
+  // sessions only, so cosine similarity ranks only their own past conversations.
+  // We fetch limit * 3 candidates and post-filter by source to exclude agent-
+  // portal sessions, then return the top `limit` results.
+  const pipeline = [
+    {
+      $vectorSearch: {
+        index: VECTOR_INDEX_NAME,
+        path: "embedding",
+        queryVector,
+        numCandidates: Math.max(limit * 20, 100),
+        limit: limit * 3, // over-fetch to absorb source post-filter
+        filter: {
+          agent_id: agentId,
+          tenant_id: tenantId,
+          customer_name: customerName,
+        },
+      },
+    },
+    // Post-filter: keep customer-portal sessions and legacy docs without source
+    {
+      $match: {
+        $or: [{ source: "customer" }, { source: { $exists: false } }],
+      },
+    },
+    { $limit: limit },
+    {
+      $project: {
+        summary: 1,
+        follow_up_actions: 1,
+        started_at: 1,
+        ended_at: 1,
+        _id: 0,
+        embedding: 0,
+        raw_transcript: 0,
+      },
+    },
+  ];
+
+  try {
+    const docs = await collection.aggregate(pipeline).toArray();
+    return docs.map((doc) => ({
+      summary: doc.summary as string,
+      follow_up_actions: doc.follow_up_actions as string[],
+      started_at: doc.started_at as string,
+      ended_at: doc.ended_at as string,
+    }));
+  } catch (err) {
+    // Vector index may not be active yet — fall back silently
+    console.warn("[CustomerMemory] Vector search unavailable, falling back to recency:", err);
+    return getRecentSessionsForCustomerFallback(agentId, tenantId, customerName, limit);
+  }
+}
+
+// ─── Recency fallback (used when vector index is unavailable) ─────────────────
+// Plain find() sorted by ended_at desc — same logic as the original implementation.
+// Called automatically by getRelevantSessionsForCustomer() if $vectorSearch fails.
+
+async function getRecentSessionsForCustomerFallback(
+  agentId: string,
+  tenantId: string,
+  customerName: string,
+  limit: number
+): Promise<PastSessionSummary[]> {
+  const db = getDb();
   const collection = db.collection<ChatSessionDoc>(CHAT_SESSIONS_COLLECTION);
 
-  // Match both new documents (source: "customer") and legacy documents saved before
-  // the source field was introduced (source field absent). Agent-portal sessions
-  // saved after this feature launched carry source: "agent" and are excluded.
   const docs = await collection
     .find(
       {
@@ -232,14 +308,42 @@ export async function getRecentSessionsForCustomer(
   }));
 }
 
+// ─── Drop Vector Search Index ─────────────────────────────────────────────────
+// Drops the existing index so it can be recreated with an updated definition.
+// Atlas does not support in-place edits to vector index filter fields.
+// Called from DELETE /api/setup-vector-index.
+
+export async function dropVectorIndex(): Promise<{ dropped: boolean; message: string }> {
+  const db = getDb();
+  const collection = db.collection(CHAT_SESSIONS_COLLECTION);
+
+  try {
+    const existingIndexes = await collection.listSearchIndexes().toArray();
+    const exists = existingIndexes.some((idx) => idx.name === VECTOR_INDEX_NAME);
+    if (!exists) {
+      return { dropped: false, message: `Index "${VECTOR_INDEX_NAME}" does not exist.` };
+    }
+    await collection.dropSearchIndex(VECTOR_INDEX_NAME);
+    return { dropped: true, message: `Index "${VECTOR_INDEX_NAME}" dropped. Call GET to recreate.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to drop index: ${msg}`);
+  }
+}
+
 // ─── Setup Vector Search Index (idempotent) ───────────────────────────────────
 // Creates the Atlas Vector Search index if it does not already exist.
 // Called from GET /api/setup-vector-index.
 //
 // Index definition:
 //   - "vector" field on `embedding` (1024 dims, cosine similarity)
-//   - "filter" fields on `tenant_id` and `agent_id` — enable Cerbos boundary
-//     enforcement inside the ANN scan via the $vectorSearch `filter` option.
+//   - "filter" fields on `tenant_id`, `agent_id`, `customer_name` — enable
+//     Cerbos boundary enforcement and per-customer scoping inside the ANN scan
+//     via the $vectorSearch `filter` option.
+//
+// NOTE: if the index already exists without customer_name as a filter field,
+// it must be dropped and recreated (Atlas does not support in-place field edits).
+// Run DELETE then GET /api/setup-vector-index, or use the Atlas UI.
 
 export async function setupVectorIndex(): Promise<{ created: boolean; message: string }> {
   const db = getDb();
@@ -286,6 +390,10 @@ export async function setupVectorIndex(): Promise<{ created: boolean; message: s
         {
           type: "filter",
           path: "agent_id",
+        },
+        {
+          type: "filter",
+          path: "customer_name",
         },
       ],
     },

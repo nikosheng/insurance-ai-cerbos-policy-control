@@ -14,7 +14,8 @@ import { createAzure } from "@ai-sdk/azure";
 import { streamText, convertToCoreMessages, type JSONValue, StreamData } from "ai";
 import { getCustomerSessionFromRequest } from "@/lib/session";
 import { createCerbosWrappedToolsForCustomer, DATA_TOOL_NAMES } from "@/mcp/mcpServer";
-import { getRecentSessionsForCustomer, type PastSessionSummary } from "@/lib/chatSessions";
+import { getRelevantSessionsForCustomer, type PastSessionSummary } from "@/lib/chatSessions";
+import { embedText } from "@/lib/voyage";
 import type { CustomerSession, McpToolResult } from "@/types";
 
 // ─── Azure provider ───────────────────────────────────────────────────────────
@@ -131,23 +132,36 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── 3. Fetch past session history (first message only) ───────────────────
-  // Only on the very first user message — the AI will carry the context forward
-  // in its own conversation history for subsequent turns in the same session.
+  // ── 3. Fetch semantically relevant past sessions (first message only) ───────
+  // Embed the customer's first message and vector-search their past sessions
+  // for the most contextually relevant conversations — not just the most recent.
+  // This ensures specific details (amounts, dates, named topics) surface even
+  // when they appeared in an older session.
+  //
+  // Only runs on the first message; subsequent turns skip the DB call because
+  // the AI already has the injected history in its conversation context.
   const isFirstMessage = (body.messages as unknown[]).length === 1;
   let pastSessions: PastSessionSummary[] = [];
   if (isFirstMessage) {
     try {
-      pastSessions = await getRecentSessionsForCustomer(
-        session.agentId,
-        session.tenantId,
-        session.clientName,
-        3
-      );
-      if (pastSessions.length > 0) {
-        console.log(
-          `[CustomerChat] Loaded ${pastSessions.length} past session(s) for ${session.clientName}`
+      // Extract the customer's first message text for embedding
+      const firstMsg = body.messages[0] as { role: string; content: string };
+      const queryText = typeof firstMsg?.content === "string" ? firstMsg.content : "";
+
+      if (queryText) {
+        const queryVector = await embedText(queryText, "query");
+        pastSessions = await getRelevantSessionsForCustomer(
+          queryVector,
+          session.agentId,
+          session.tenantId,
+          session.clientName,
+          3
         );
+        if (pastSessions.length > 0) {
+          console.log(
+            `[CustomerChat] Loaded ${pastSessions.length} relevant past session(s) for ${session.clientName}`
+          );
+        }
       }
     } catch (err) {
       // Non-fatal — proceed without history rather than failing the request
