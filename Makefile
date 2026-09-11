@@ -10,6 +10,7 @@
 PORT     := 3888
 APP_URL  := http://localhost:$(PORT)
 SEED_URL := $(APP_URL)/api/seed
+COMPOSE   := docker compose --env-file .env.local
 
 .DEFAULT_GOAL := help
 
@@ -50,7 +51,7 @@ help:
 .PHONY: up
 up:
 	@echo "▶ Starting containers..."
-	docker compose up -d
+	$(COMPOSE) up -d
 	@echo "▶ Waiting for Cerbos to be healthy..."
 	@until docker inspect insurance_cerbos --format='{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do \
 		printf "."; sleep 2; \
@@ -61,14 +62,14 @@ up:
 .PHONY: down
 down:
 	@echo "▶ Stopping containers..."
-	docker compose down
+	$(COMPOSE) down
 
 .PHONY: restart
 restart: down up
 
 .PHONY: logs
 logs:
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 .PHONY: status
 status:
@@ -181,7 +182,7 @@ boot: up
 .PHONY: nuke
 nuke:
 	@echo "▶ Nuking containers and volumes..."
-	docker compose down -v
+	$(COMPOSE) down -v
 	@echo "✓ All containers and volumes removed."
 
 ## Create the Atlas Vector Search index for the chat_sessions collection.
