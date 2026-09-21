@@ -3,7 +3,7 @@ import { createAzure } from "@ai-sdk/azure";
 import { streamText, convertToCoreMessages, StreamData, type JSONValue, tool } from "ai";
 import { jsonSchema } from "ai";
 import { getSessionFromRequest } from "@/lib/session";
-import { createCerbosWrappedTools, DATA_TOOL_NAMES } from "@/mcp/mcpServer";
+import { createCerbosWrappedTools, createCustomer360Tools, DATA_TOOL_NAMES } from "@/mcp/mcpServer";
 import { getCerbosClient, buildCerbosPrincipal, CHAT_SESSION_RESOURCE_KIND } from "@/lib/cerbos";
 import { planResponseToMongoFilter } from "@/lib/ast-to-mongo";
 import { embedText } from "@/lib/voyage";
@@ -173,6 +173,7 @@ export async function POST(req: NextRequest) {
 
   // ── Step 3: Build Cerbos-wrapped MCP tool registry ───────────────────────
   const { _mcpClient, _connectionId, ...mcpTools } = await createCerbosWrappedTools(session);
+  const { _customer360McpClient, ...customer360Tools } = await createCustomer360Tools(session);
 
   // ── Step 4: Build search_sessions tool ───────────────────────────────────
   // This tool lives in the chat route (not mcpServer.ts) because it needs:
@@ -385,6 +386,7 @@ Examples of queries that should use this tool:
   // ── Step 5: Merge all tools ───────────────────────────────────────────────
   const allTools = {
     ...mcpTools,
+    ...customer360Tools,
     search_sessions: searchSessionsTool,
   };
 

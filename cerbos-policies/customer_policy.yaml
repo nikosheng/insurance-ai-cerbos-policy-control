@@ -1,0 +1,23 @@
+---
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: customer
+  version: default
+  rules:
+    # Customer 360 is intentionally agent-owned. Tenant admins are default-denied
+    # until an explicit tenant-admin rule is added to this PDP policy.
+    - name: assigned_agent_customer_360
+      actions:
+        - read
+        - list
+        - aggregate
+        - search
+      effect: EFFECT_ALLOW
+      roles:
+        - insurance_agent
+      condition:
+        match:
+          all:
+            of:
+              - expr: R.attr.tenant_id == P.attr.tenant_id
+              - expr: R.attr.agent_id == P.id

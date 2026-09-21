@@ -2,24 +2,17 @@ import { NextResponse } from "next/server";
 import { seedDatabase, resetAndReseedDatabase } from "@/lib/db";
 
 // ─── GET /api/seed ─────────────────────────────────────────────────────────────
-// Idempotent seed — inserts the 4 mock policies if the collection is empty.
-// Safe to call multiple times; skips insertion when documents already exist.
-//
-// Response examples:
-//   { ok: true, seeded: true,  count: 4, message: "Seeded 4 documents into insurance_policies." }
-//   { ok: true, seeded: false, count: 4, message: "Already seeded — 4 documents present. No changes made." }
+// Destructive demo reset. Every invocation removes all data from the four demo
+// collections and inserts the latest deterministic Customer 360 dataset.
 
 export async function GET() {
   try {
-    const { seeded, count } = await seedDatabase();
-
-    const message = seeded
-      ? `Seeded ${count} documents into insurance_policies.`
-      : `Already seeded — ${count} document(s) present. No changes made.`;
+    const collections = await seedDatabase();
+    const message = "Reset and re-seeded insurance policies, customers, deals, and activities.";
 
     console.log(`[Seed API] GET → ${message}`);
 
-    return NextResponse.json({ ok: true, seeded, count, message }, { status: 200 });
+    return NextResponse.json({ ok: true, reset: true, collections, message }, { status: 200 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[Seed API] GET failed:", message);
@@ -28,20 +21,15 @@ export async function GET() {
 }
 
 // ─── DELETE /api/seed ──────────────────────────────────────────────────────────
-// Drops the insurance_policies collection and re-seeds it from scratch.
-// Use this to reset test data back to the original 4 documents at any time.
-//
-// Response example:
-//   { ok: true, count: 4, message: "Collection dropped and re-seeded with 4 documents." }
+// DELETE is an alias for GET so either method produces the current demo dataset.
 
 export async function DELETE() {
   try {
-    const { count } = await resetAndReseedDatabase();
-
-    const message = `Collection dropped and re-seeded with ${count} documents.`;
+    const collections = await resetAndReseedDatabase();
+    const message = "Reset and re-seeded insurance policies, customers, deals, and activities.";
     console.log(`[Seed API] DELETE → ${message}`);
 
-    return NextResponse.json({ ok: true, count, message }, { status: 200 });
+    return NextResponse.json({ ok: true, reset: true, collections, message }, { status: 200 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[Seed API] DELETE failed:", message);

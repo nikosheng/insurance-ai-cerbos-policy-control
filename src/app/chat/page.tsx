@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useChat } from "ai/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -602,7 +603,10 @@ export default function ChatPage() {
           </div>
 
           {/* Right: Status + actions */}
-          <div className="flex items-center gap-3 flex-shrink-0">
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <Link href="/customers" className="hidden sm:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600 transition-colors">
+                <User className="w-3 h-3" />Customer 360
+              </Link>
             <div className="hidden sm:flex items-center gap-1.5 text-xs text-emerald-400">
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 status-pulse" />
               <span className="font-mono">ABAC Active</span>

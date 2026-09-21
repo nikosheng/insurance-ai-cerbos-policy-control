@@ -1,9 +1,43 @@
-version: "3.9"
-
 services:
+  app:
+    build:
+      context: .
+    container_name: insurance_app
+    working_dir: /app
+    env_file:
+      - .env.local
+    environment:
+      # Containers use Compose service DNS names rather than host localhost.
+      CERBOS_URL: http://cerbos:3592
+      MDB_MCP_SERVER_URL: http://mongodb-mcp-server:4000/mcp
+      WATCHPACK_POLLING: "true"
+    command: npm run dev -- -H 0.0.0.0
+    ports:
+      - "3888:3888"
+    volumes:
+      - .:/app
+      - app_node_modules:/app/node_modules
+    depends_on:
+      cerbos:
+        condition: service_healthy
+      mongodb-mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3888/"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   cerbos:
     image: ghcr.io/cerbos/cerbos:latest
     container_name: insurance_cerbos
+    healthcheck:
+      test: ["CMD", "/cerbos", "healthcheck", "--config=/dev/null", "--kind=http", "--insecure"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     ports:
       - "3592:3592"
       - "3593:3593"
@@ -16,12 +50,6 @@ services:
       - "--set=server.grpcListenAddr=:3593"
       - "--set=storage.driver=disk"
       - "--set=storage.disk.directory=/policies"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3592/_cerbos/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
 
   # ── mongodb-mcp-server ───────────────────────────────────────────────────────
   # Runs the official MongoDB MCP server as an HTTP service on port 4000.
@@ -65,8 +93,11 @@ services:
       DO_NOT_TRACK: "1"
       NO_UPDATE_NOTIFIER: "1"
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "require('net').connect(4000,'localhost').once('connect',function(){this.end();process.exit(0)}).once('error',()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 12
       start_period: 60s
+
+volumes:
+  app_node_modules:

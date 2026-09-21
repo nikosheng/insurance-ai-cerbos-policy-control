@@ -24,6 +24,8 @@ A production-pattern AI chat application demonstrating **zero-trust multi-tenant
 Browser
 ├── /                    Agent login page (4 agents + test scenarios)
 ├── /chat                Agent chat — policies + session search unified
+├── /customers            Agent-only, read-only Customer 360 directory
+├── /customers/[customerId]  Cerbos-authorized customer profile
 └── /customer            Customer login + /customer/chat
 
 Next.js API Routes
@@ -34,15 +36,21 @@ Next.js API Routes
 ├── /api/customer-session     Customer httpOnly cookie management
 ├── /api/session         Agent httpOnly cookie management
 ├── /api/seed            Seed / reset 20 mock insurance policies
+├── /api/customers        Customer 360 directory, profile, and semantic search
+├── /api/setup-customer-vector-index  Generate profile embeddings + Atlas index
 └── /api/setup-vector-index   Create Atlas Vector Search index
 
 Docker Compose
-├── Cerbos PDP         :3592  (HTTP)  :3593 (gRPC)
-└── mongodb-mcp-server :4000  (HTTP, --readOnly)
+├── Next.js app         :3888  (development server with Fast Refresh)
+├── Cerbos PDP          :3592  (HTTP)  :3593 (gRPC)
+└── mongodb-mcp-server  :4000  (HTTP, --readOnly)
 
 MongoDB Atlas
 ├── insurance_policies   20 mock documents (2 tenants, 3 agents, 20 customers)
 └── chat_sessions        Voyage AI embeddings as BSON Binary (Float32Array, 1024 dims)
+├── customers             Assigned-agent Customer 360 profiles
+├── deals                 Read-only CRM pipeline records
+└── activities            Read-only CRM interaction timeline
 ```
 
 ---
@@ -258,18 +266,19 @@ VOYAGE_ENDPOINT=https://ai.mongodb.com/v1/embeddings
 VOYAGE_API_KEY=your-atlas-model-api-key
 ```
 
-### 3. Start infrastructure
+### 3. Start the application and infrastructure
 
 ```bash
-make up          # starts Cerbos + mongodb-mcp-server containers
+make up          # starts Next.js, Cerbos, and mongodb-mcp-server containers
 ```
 
-### 4. Start the app
+The app is available at `http://localhost:3888`. Source changes are bind-mounted
+into the container and reload through Next.js Fast Refresh.
+
+### 4. Alternative: run the app locally
 
 ```bash
-make dev         # Next.js on port 3888
-# or
-make boot        # up + dev in one command
+make dev         # Next.js on port 3888; run make up first for dependencies
 ```
 
 ### 5. Seed the database
@@ -450,7 +459,7 @@ How do I make a claim?
 ## Makefile Commands
 
 ```bash
-make up           # Start Cerbos + mongodb-mcp-server containers
+make up           # Start Next.js + Cerbos + mongodb-mcp-server containers
 make down         # Stop containers
 make restart      # down + up
 make logs         # Tail all container logs
@@ -458,7 +467,7 @@ make status       # Show container health
 
 make dev          # Start Next.js dev server (port 3888)
 make build        # Production build
-make boot         # up + dev (one command start)
+make boot         # Alias for make up
 
 make seed         # Seed 20 mock policies (idempotent)
 make reset        # Drop + re-seed all policies
@@ -589,4 +598,4 @@ The role propagates automatically through the cookie → Cerbos principal → po
 | Vector Embeddings | Voyage AI `voyage-4` via MongoDB Atlas managed endpoint |
 | Vector Search | Atlas Vector Search (`$vectorSearch`, 1024-dim cosine) |
 | Session | httpOnly cookies, `SameSite=Strict` |
-| Infrastructure | Docker Compose (Cerbos + mongodb-mcp-server) |
+| Infrastructure | Docker Compose (Next.js + Cerbos + mongodb-mcp-server) |

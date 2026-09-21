@@ -21,15 +21,15 @@ help:
 	@echo "  InsureAI — available commands"
 	@echo ""
 	@echo "  Infrastructure"
-	@echo "    make up          Start Cerbos + mongodb-mcp-server (detached)"
+	@echo "    make up          Start the app, Cerbos, and mongodb-mcp-server (detached)"
 	@echo "    make down        Stop and remove containers"
 	@echo "    make restart     down + up"
 	@echo "    make logs        Tail all container logs"
-	@echo "    make status      Show container health"
+	@echo "    make status      Show all Compose container health"
 	@echo "    make mcp-status  Check mongodb-mcp-server health"
 	@echo "    make mcp-logs    Tail mongodb-mcp-server logs only"
 	@echo ""
-	@echo "  Database  (requires: npm run dev is running on port $(PORT))"
+	@echo "  Database  (requires: the app service running on port $(PORT))"
 	@echo "    make seed           Seed Atlas DB with 20 records (idempotent)"
 	@echo "    make reset          Drop collection and re-seed all 20 records"
 	@echo "    make db-count       Show document count per agent"
@@ -43,7 +43,7 @@ help:
 	@echo "    make start       Start production server on port $(PORT)"
 	@echo ""
 	@echo "  Convenience"
-	@echo "    make boot        up (containers) + dev (Next.js)"
+	@echo "    make boot        Alias for up"
 	@echo "    make nuke        down + remove volumes (full wipe)"
 	@echo ""
 
@@ -51,12 +51,7 @@ help:
 .PHONY: up
 up:
 	@echo "▶ Starting containers..."
-	$(COMPOSE) up -d
-	@echo "▶ Waiting for Cerbos to be healthy..."
-	@until docker inspect insurance_cerbos --format='{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do \
-		printf "."; sleep 2; \
-	done
-	@echo ""
+	$(COMPOSE) up -d --wait
 	@echo "✓ Containers ready."
 
 .PHONY: down
@@ -74,6 +69,7 @@ logs:
 .PHONY: status
 status:
 	@docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" \
+		--filter name=insurance_app \
 		--filter name=insurance_cerbos \
 		--filter name=insurance_mcp_server
 
@@ -98,7 +94,7 @@ mcp-logs:
 # ── Database ───────────────────────────────────────────────────────────────────
 # All operations use the MongoDB Node.js driver via the /api/seed route.
 # No mongosh or local MongoDB container required.
-# Requires: npm run dev to be running on port $(PORT).
+# Requires: the app service to be running on port $(PORT).
 
 ## Idempotent seed — only inserts 20 records if the collection is empty.
 ## Uses the MongoDB driver (MONGODB_URI from .env.local) — no mongosh needed.
@@ -170,13 +166,9 @@ start:
 
 # ── Convenience ────────────────────────────────────────────────────────────────
 
-## One-command start: bring up containers, then start Next.js dev server.
-## Database seeding happens automatically on the first tool call (auto-seed).
-## Or run `make seed` manually after the server starts.
+## The Compose app service runs the Next.js development server with Fast Refresh.
 .PHONY: boot
 boot: up
-	@echo "▶ Starting Next.js dev server on port $(PORT)..."
-	npm run dev
 
 ## Full wipe: stop containers and delete all Docker volumes
 .PHONY: nuke

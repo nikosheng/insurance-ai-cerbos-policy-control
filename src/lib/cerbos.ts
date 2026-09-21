@@ -33,3 +33,6 @@ export function buildCerbosPrincipal(session: AgentSession) {
 // ─── Resource Kinds ───────────────────────────────────────────────────────────
 export const INSURANCE_POLICY_RESOURCE_KIND = "insurance_policy";
 export const CHAT_SESSION_RESOURCE_KIND     = "chat_session";
+export const CUSTOMER_RESOURCE_KIND         = "customer";
+export const DEAL_RESOURCE_KIND             = "deal";
+export const ACTIVITY_RESOURCE_KIND         = "activity";

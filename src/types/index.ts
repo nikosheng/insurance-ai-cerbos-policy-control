@@ -37,6 +37,9 @@ export interface InsurancePolicy {
   policy_number: string;
   client_name: string;
   client_email: string;
+  // Canonical relationship to the Customer 360 profile. Client fields remain for
+  // the existing customer portal and backwards-compatible policy queries.
+  customer_id?: string;
   policy_type: "Auto" | "Home" | "Life";
   coverage_amount: number;
   premium_monthly: number;
@@ -51,6 +54,66 @@ export interface InsurancePolicy {
   // Human-readable agent name stored alongside agent_id so queries like
   // "show me Sarah Chen's policies" resolve without a directory lookup.
   agent_name: string;
+}
+
+// ─── Customer 360 Documents ───────────────────────────────────────────────────
+// Every CRM resource carries the same ownership fields. Cerbos compiles these
+// fields into the mandatory query and vector-search filters.
+export interface Customer {
+  customer_id: string;
+  full_name: string;
+  email: string;
+  phone: string;
+  lifecycle_stage: "Prospect" | "Active" | "At Risk" | "Renewal";
+  preferred_contact_method: "Email" | "Phone" | "SMS";
+  segment: string;
+  profile_summary: string;
+  tenant_id: string;
+  agent_id: string;
+  agent_name: string;
+}
+
+export interface Deal {
+  deal_id: string;
+  customer_id: string;
+  customer_name: string;
+  title: string;
+  stage: "Qualification" | "Proposal" | "Negotiation" | "Closed Won" | "Closed Lost";
+  amount: number;
+  probability: number;
+  expected_close_date: string;
+  product_or_policy_type: "Auto" | "Home" | "Life";
+  next_step: string;
+  tenant_id: string;
+  agent_id: string;
+  agent_name: string;
+}
+
+export interface Activity {
+  activity_id: string;
+  customer_id: string;
+  customer_name: string;
+  deal_id: string | null;
+  type: "Call" | "Email" | "Meeting" | "Note" | "Task";
+  occurred_at: string;
+  summary: string;
+  outcome: string;
+  follow_up_due_at: string | null;
+  status: "Completed" | "Open";
+  tenant_id: string;
+  agent_id: string;
+  agent_name: string;
+}
+
+export interface ActivitySearchResult extends Activity {
+  score: number;
+}
+
+export interface Customer360Profile {
+  customer: Customer;
+  policies: InsurancePolicy[];
+  deals: Deal[];
+  activities: Activity[];
 }
 
 // ─── Cerbos Plan Telemetry ────────────────────────────────────────────────────

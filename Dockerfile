@@ -1,0 +1,10 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+EXPOSE 3888
+
+CMD ["npm", "run", "dev", "--", "-H", "0.0.0.0"]

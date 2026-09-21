@@ -1,5 +1,7 @@
 import { MongoClient, Db, Document } from "mongodb";
-import type { InsurancePolicy } from "@/types";
+import type { Activity, Customer, Deal, InsurancePolicy } from "@/types";
+import { CUSTOMER_REGISTRY } from "./customers";
+import { ACTIVITIES_COLLECTION, CUSTOMERS_COLLECTION, DEALS_COLLECTION, seedCrmData } from "./crm";
 
 // ─── In-Memory Mock Data ───────────────────────────────────────────────────────
 // 20 policies across 2 tenants and 3 agents.
@@ -389,47 +391,113 @@ async function connectToMongo(): Promise<{ client: MongoClient; db: Db }> {
 }
 
 // ─── Database Seeder ───────────────────────────────────────────────────────────
-// Idempotent — checks document count before inserting.
-// Safe to call multiple times; only inserts when the collection is empty.
+// Deterministic demo reset. Every invocation clears and recreates every
+// Customer 360 collection so new schema/data changes are always applied.
 
-export async function seedDatabase(): Promise<{ seeded: boolean; count: number }> {
+export interface SeedResult {
+  insurance_policies: number;
+  customers: number;
+  deals: number;
+  activities: number;
+}
+
+export async function seedDatabase(): Promise<SeedResult> {
   const { db } = await connectToMongo();
   const collection = db.collection<Document>("insurance_policies");
 
-  const count = await collection.countDocuments();
-  if (count > 0) {
-    console.log(`[DB] Collection already has ${count} document(s) — skipping seed.`);
-    return { seeded: false, count };
-  }
+  const customers: Customer[] = CUSTOMER_REGISTRY.map((entry, index) => ({
+    customer_id: entry.clientId,
+    full_name: entry.clientName,
+    email: entry.clientEmail,
+    phone: `+1-555-01${String(index + 10).padStart(2, "0")}`,
+    lifecycle_stage: index % 6 === 0 ? "At Risk" : index % 5 === 0 ? "Renewal" : "Active",
+    preferred_contact_method: index % 3 === 0 ? "Phone" : index % 3 === 1 ? "Email" : "SMS",
+    segment: index % 2 === 0 ? "Personal Lines" : "Household Growth",
+    profile_summary: `${entry.clientName} is a ${entry.policyType.toLowerCase()} insurance customer managed by ${entry.agentName}.`,
+    tenant_id: entry.tenantId,
+    agent_id: entry.agentId,
+    agent_name: entry.agentName,
+  }));
+  const deals: Deal[] = customers.filter((_, index) => index % 2 === 0).map((customer, index) => ({
+    deal_id: `deal_${String(index + 1).padStart(3, "0")}`,
+    customer_id: customer.customer_id,
+    customer_name: customer.full_name,
+    title: `${index % 3 === 0 ? "Coverage" : "Renewal"} review`,
+    stage: index % 4 === 0 ? "Proposal" : index % 4 === 1 ? "Qualification" : "Negotiation",
+    amount: 500 + index * 175,
+    probability: 40 + (index % 4) * 15,
+    expected_close_date: `2026-${String((index % 9) + 4).padStart(2, "0")}-15`,
+    product_or_policy_type: CUSTOMER_REGISTRY.find((entry) => entry.clientId === customer.customer_id)?.policyType as Deal["product_or_policy_type"],
+    next_step: index % 2 === 0 ? "Schedule coverage review" : "Send proposal summary",
+    tenant_id: customer.tenant_id,
+    agent_id: customer.agent_id,
+    agent_name: customer.agent_name,
+  }));
+  const activityScenarios: Array<{ type: Activity["type"]; summary: string; outcome: string; followUp: boolean }> = [
+    { type: "Call", summary: "Discussed a $1,200 collision repair estimate after a parking-lot incident. Customer asked whether the $500 deductible applies before repairs begin and whether rental reimbursement is included while the vehicle is in the shop.", outcome: "Send the repair-claim checklist and confirm rental reimbursement limits by email.", followUp: true },
+    { type: "Meeting", summary: "Reviewed homeowners coverage pending a final construction inspection. Customer is concerned the inspection could slip beyond the closing date and create a temporary coverage gap while the builder completes outstanding work.", outcome: "Collect inspection certificate and call the builder about timing before binding coverage.", followUp: true },
+    { type: "Email", summary: "Customer asked whether current term-life coverage remains sufficient after welcoming a second child and increasing their mortgage. Requested a side-by-side comparison of higher coverage versus a supplemental term policy.", outcome: "Prepare a life-insurance needs analysis for the annual review.", followUp: true },
+    { type: "Note", summary: "Former auto-policy customer sold their vehicle and asked about non-owner coverage for occasional rental cars and car-share services. They may revisit bundled renters coverage after an upcoming move.", outcome: "Reconnect after move date with non-owner and renters bundle options.", followUp: false },
+    { type: "Call", summary: "Customer raised concerns about renewal pricing after a premium increase. Reviewed discounts for bundled coverage, telematics enrollment, and annual payment; customer prefers a simple breakdown of savings before deciding.", outcome: "Send renewal comparison and discount eligibility summary.", followUp: true },
+    { type: "Email", summary: "Customer reported adding a teenage driver to the household and wants to understand the impact on auto premiums, safe-driving discounts, and deductible options before the learner permit becomes active.", outcome: "Quote household driver change and share safe-driver program details.", followUp: true },
+    { type: "Meeting", summary: "Reviewed high-value home coverage after a recent appraisal identified additional jewelry and art. Customer wants confirmation that scheduled-property limits cover the updated valuation and asked about annual appraisal requirements.", outcome: "Request appraisal documents and prepare scheduled-property rider recommendation.", followUp: true },
+    { type: "Task", summary: "Follow-up task from a prior claim conversation: verify whether water damage was caused by a sudden pipe failure or gradual seepage, because coverage and documentation requirements differ.", outcome: "Await plumber report and photographs before advising on claim submission.", followUp: true },
+    { type: "Call", summary: "Customer planning international travel asked whether their home policy includes protection for valuables away from home and whether a vacant-home endorsement is needed during an extended trip.", outcome: "Send travel and vacancy coverage guidance with endorsement quote.", followUp: false },
+    { type: "Note", summary: "Customer expressed interest in combining auto and home policies but is hesitant after a previous claims experience. They want to see service commitments and bundled premium savings before changing providers.", outcome: "Share bundle proposal and claims-service overview at the next check-in.", followUp: true },
+  ];
+  const activities: Activity[] = customers.flatMap((customer, index) => [0, 1, 2].map((offset) => {
+    const scenario = activityScenarios[(index * 3 + offset) % activityScenarios.length];
+    const day = String(((index * 3 + offset) % 25) + 1).padStart(2, "0");
+    return {
+      activity_id: `act_${String(index * 3 + offset + 1).padStart(3, "0")}`,
+      customer_id: customer.customer_id,
+      customer_name: customer.full_name,
+      deal_id: deals.find((deal) => deal.customer_id === customer.customer_id)?.deal_id ?? null,
+      type: scenario.type,
+      occurred_at: `2026-02-${day}T${String(9 + offset * 2).padStart(2, "0")}:00:00.000Z`,
+      summary: scenario.summary,
+      outcome: scenario.outcome,
+      follow_up_due_at: scenario.followUp ? `2026-03-${day}T16:00:00.000Z` : null,
+      status: scenario.followUp && offset === 0 ? "Open" : "Completed",
+      tenant_id: customer.tenant_id,
+      agent_id: customer.agent_id,
+      agent_name: customer.agent_name,
+    };
+  }));
 
-  await collection.insertMany(MOCK_POLICIES as unknown as Document[]);
-  console.log("[DB] Seeded insurance_policies with 4 documents.");
+  const policies = MOCK_POLICIES.map((policy) => ({
+    ...policy,
+    customer_id: CUSTOMER_REGISTRY.find((entry) => entry.clientName === policy.client_name)?.clientId,
+  }));
+
+  await Promise.all([
+    collection.deleteMany({}),
+    db.collection(CUSTOMERS_COLLECTION).deleteMany({}),
+    db.collection(DEALS_COLLECTION).deleteMany({}),
+    db.collection(ACTIVITIES_COLLECTION).deleteMany({}),
+  ]);
+
+  await collection.insertMany(policies as unknown as Document[]);
+  const crmCounts = await seedCrmData(db, customers, deals, activities);
+  console.log(`[DB] Reset and seeded ${policies.length} policies, ${crmCounts.customers} customers, ${crmCounts.deals} deals, and ${crmCounts.activities} activities.`);
 
   // Indexes for query performance on the security filter fields
   await collection.createIndex({ tenant_id: 1, agent_id: 1 });
   await collection.createIndex({ policy_type: 1 });
   await collection.createIndex({ status: 1 });
+  await collection.createIndex({ tenant_id: 1, customer_id: 1 });
 
   dbSeeded = true;
-  return { seeded: true, count: MOCK_POLICIES.length };
+  return { insurance_policies: policies.length, ...crmCounts };
 }
 
 // ─── Database Reset ────────────────────────────────────────────────────────────
 // Drops the collection and re-seeds from scratch.
 // Exposed by DELETE /api/seed for test data resets.
 
-export async function resetAndReseedDatabase(): Promise<{ count: number }> {
-  const { db } = await connectToMongo();
-  const collection = db.collection<Document>("insurance_policies");
-
-  await collection.drop().catch(() => {
-    // Collection may not exist yet — that's fine
-  });
-
+export async function resetAndReseedDatabase(): Promise<SeedResult> {
   dbSeeded = false;
-  const result = await seedDatabase();
-  console.log(`[DB] Reset complete. Re-seeded ${result.count} document(s).`);
-  return { count: result.count };
+  return seedDatabase();
 }
 
 // ─── Query Engine ──────────────────────────────────────────────────────────────

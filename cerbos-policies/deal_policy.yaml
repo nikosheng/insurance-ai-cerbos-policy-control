@@ -1,0 +1,16 @@
+---
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: deal
+  version: default
+  rules:
+    - name: assigned_agent_deals
+      actions: [read, list, aggregate, search]
+      effect: EFFECT_ALLOW
+      roles: [insurance_agent]
+      condition:
+        match:
+          all:
+            of:
+              - expr: R.attr.tenant_id == P.attr.tenant_id
+              - expr: R.attr.agent_id == P.id

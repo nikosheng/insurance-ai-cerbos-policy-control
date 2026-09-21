@@ -1,6 +1,6 @@
 import { tool, jsonSchema } from "ai";
 import { createMCPClient } from "@ai-sdk/mcp";
-import { getCerbosClient, buildCerbosPrincipal, INSURANCE_POLICY_RESOURCE_KIND } from "@/lib/cerbos";
+import { getCerbosClient, buildCerbosPrincipal, INSURANCE_POLICY_RESOURCE_KIND, CUSTOMER_RESOURCE_KIND, DEAL_RESOURCE_KIND, ACTIVITY_RESOURCE_KIND } from "@/lib/cerbos";
 import { planResponseToMongoFilter } from "@/lib/ast-to-mongo";
 import { mergeFilters } from "@/lib/db";
 import type { AgentSession, CustomerSession, InsurancePolicy, McpToolResult, SecurityContext } from "@/types";
@@ -616,6 +616,70 @@ Use this to understand which fields are indexed for efficient querying.`,
 // Used by the chat route's onStepFinish to detect which tool calls carry
 // SecurityContext telemetry that should be streamed to the analytics panel.
 export const DATA_TOOL_NAMES = new Set(["find", "aggregate", "count"]);
+
+// CRM tools use fixed collection/resource pairs. The LLM supplies a query only;
+// Cerbos derives and injects the assigned-agent scope on every call.
+export async function createCustomer360Tools(session: AgentSession) {
+  const url = process.env.MDB_MCP_SERVER_URL;
+  const uri = process.env.MONGODB_URI;
+  if (!url || !uri) throw new Error("MDB_MCP_SERVER_URL and MONGODB_URI are required.");
+  const client = await createMCPClient({ transport: { type: "http", url } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mcp = await client.tools() as Record<string, any>;
+  let connectionId = CONNECTION_ID;
+  try {
+    const result = await mcp.connect.execute({ connectionString: uri, connectionName: "customer-360" }, { abortSignal: undefined });
+    const text = result.content?.map((part: { text?: string }) => part.text ?? "").join(" ") ?? "";
+    const match = text.match(/\"([a-f0-9-]{36})\"/);
+    if (match) connectionId = match[1];
+  } catch { /* use preconfigured connection */ }
+
+  function resourceTools(prefix: string, collection: string, kind: string) {
+    async function secured(filter: Record<string, unknown>) {
+      const plan = await getCerbosClient().planResources({ principal: buildCerbosPrincipal(session), resource: { kind }, action: "read" });
+      return mergeFilters(planResponseToMongoFilter(plan).filter, filter);
+    }
+    return {
+      [`find_${prefix}`]: tool({
+        description: `Query authorized ${prefix}. Identity and collection fields are server-enforced.`,
+        parameters: jsonSchema<{ filter_json: string; limit: number }>({ type: "object", properties: { filter_json: { type: "string", default: "{}" }, limit: { type: "number", default: 50 } }, required: ["filter_json", "limit"], additionalProperties: false }),
+        execute: async ({ filter_json, limit }) => {
+          let filter: Record<string, unknown> = {}; try { filter = JSON.parse(filter_json || "{}"); } catch { /* empty filter */ }
+          const result = await mcp.find.execute({ connectionId, database: DB_NAME(), collection, filter: await secured(filter), limit: Math.min(Math.max(limit, 1), 100) }, { abortSignal: undefined });
+          const documents = parseMcpContent(result.content ?? []);
+          return { documents, total_count: documents.length, message: `Found ${documents.length} authorized ${prefix} record(s).` };
+        },
+      }),
+      [`aggregate_${prefix}`]: tool({
+        description: `Aggregate authorized ${prefix}. Cerbos prepends the mandatory ownership match.`,
+        parameters: jsonSchema<{ pipeline_json: string }>({ type: "object", properties: { pipeline_json: { type: "string", default: "[]" } }, required: ["pipeline_json"], additionalProperties: false }),
+        execute: async ({ pipeline_json }) => {
+          let pipeline: Record<string, unknown>[] = []; try { pipeline = JSON.parse(pipeline_json || "[]"); } catch { /* empty pipeline */ }
+          if (!Array.isArray(pipeline)) pipeline = [];
+          const result = await mcp.aggregate.execute({ connectionId, database: DB_NAME(), collection, pipeline: [{ $match: await secured({}) }, ...pipeline] }, { abortSignal: undefined });
+          const documents = parseMcpContent(result.content ?? []);
+          return { documents, total_count: documents.length, message: `Aggregation returned ${documents.length} authorized ${prefix} result(s).` };
+        },
+      }),
+      [`count_${prefix}`]: tool({
+        description: `Count authorized ${prefix}. Cerbos injects ownership scope.`,
+        parameters: jsonSchema<{ query_json: string }>({ type: "object", properties: { query_json: { type: "string", default: "{}" } }, required: ["query_json"], additionalProperties: false }),
+        execute: async ({ query_json }) => {
+          let query: Record<string, unknown> = {}; try { query = JSON.parse(query_json || "{}"); } catch { /* empty query */ }
+          const result = await mcp.count.execute({ connectionId, database: DB_NAME(), collection, query: await secured(query) }, { abortSignal: undefined });
+          const total_count = Number((result.content?.[0]?.text ?? "").match(/(\d+)/)?.[1] ?? 0);
+          return { documents: [], total_count, message: `Count result: ${total_count} authorized ${prefix} record(s).` };
+        },
+      }),
+    };
+  }
+  return {
+    ...resourceTools("customers", "customers", CUSTOMER_RESOURCE_KIND),
+    ...resourceTools("deals", "deals", DEAL_RESOURCE_KIND),
+    ...resourceTools("activities", "activities", ACTIVITY_RESOURCE_KIND),
+    _customer360McpClient: client,
+  };
+}
 
 // ─── Customer SecurityContext builder ─────────────────────────────────────────
 function buildSecurityContextForCustomer(
